@@ -34,6 +34,7 @@ pub const EISDIR: i64 = -21;
 pub const EINVAL: i64 = -22;
 pub const EMFILE: i64 = -24;
 pub const ENOTTY: i64 = -25;
+pub const EFBIG: i64 = -27;
 pub const ESPIPE: i64 = -29;
 pub const EPIPE: i64 = -32;
 pub const ENOTEMPTY: i64 = -39;
@@ -53,6 +54,58 @@ const MAX_RW_COUNT: usize = 1024 * 1024;
 
 /// Maximum number of iovec entries (Linux default)
 const IOV_MAX: usize = 1024;
+
+// =============================================================================
+// RLIMIT_NOFILE enforcement helpers
+// =============================================================================
+
+/// Check if allocating a new fd would exceed RLIMIT_NOFILE
+///
+/// Returns true if the allocation would succeed, false if it would exceed the limit.
+/// The `next_fd` parameter should be the fd number that would be allocated.
+#[inline]
+fn check_nofile_limit(next_fd: i32) -> bool {
+    let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_NOFILE);
+    limit == crate::rlimit::RLIM_INFINITY || (next_fd as u64) < limit
+}
+
+/// Check if a specific target fd is within RLIMIT_NOFILE
+///
+/// Returns true if the fd is valid for use, false if it exceeds the limit.
+#[inline]
+fn check_nofile_target(target_fd: i32) -> bool {
+    let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_NOFILE);
+    limit == crate::rlimit::RLIM_INFINITY || (target_fd as u64) < limit
+}
+
+// =============================================================================
+// RLIMIT_FSIZE enforcement helpers
+// =============================================================================
+
+/// Check RLIMIT_FSIZE before a write operation
+///
+/// If the write would exceed RLIMIT_FSIZE, sends SIGXFSZ and returns EFBIG.
+/// Returns Ok(()) if the write is within limits.
+///
+/// # Arguments
+/// * `offset` - Starting offset for the write
+/// * `count` - Number of bytes to write
+#[inline]
+fn check_fsize_limit(offset: u64, count: usize) -> Result<(), i64> {
+    let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_FSIZE);
+    if limit == crate::rlimit::RLIM_INFINITY {
+        return Ok(());
+    }
+
+    let final_size = offset.saturating_add(count as u64);
+    if final_size > limit {
+        // Send SIGXFSZ before returning error (per POSIX/Linux requirement)
+        let tid = current_tid();
+        crate::signal::send_signal(tid, crate::signal::SIGXFSZ);
+        return Err(EFBIG);
+    }
+    Ok(())
+}
 
 /// Get the current task's FD table
 ///
@@ -270,9 +323,16 @@ pub fn sys_openat(dirfd: i32, path_ptr: u64, flags: u32, mode: u32) -> i64 {
     // Create file object
     let file = Arc::new(File::new(dentry, flags, f_op));
 
-    // Allocate file descriptor
-    let fd = current_fd_table().lock().alloc(file);
+    // Allocate file descriptor (with RLIMIT_NOFILE check)
+    let fd_table = current_fd_table();
+    let mut table = fd_table.lock();
 
+    // Check RLIMIT_NOFILE before allocating
+    if !check_nofile_limit(table.next_fd()) {
+        return EMFILE;
+    }
+
+    let fd = table.alloc(file);
     fd as i64
 }
 
@@ -485,6 +545,44 @@ pub fn sys_write(fd: i32, buf_ptr: u64, count: u64) -> i64 {
         return EFAULT;
     }
 
+    // Handle special fds (stdout, stderr) - no RLIMIT_FSIZE check needed
+    if fd == 1 || fd == 2 {
+        // Use stack buffer for small writes
+        if count <= SMALL_BUF_SIZE {
+            let mut stack_buf = [0u8; SMALL_BUF_SIZE];
+            let write_buf = &mut stack_buf[..count];
+            unsafe {
+                Uaccess::user_access_begin();
+                core::ptr::copy_nonoverlapping(buf_ptr as *const u8, write_buf.as_mut_ptr(), count);
+                Uaccess::user_access_end();
+            }
+            console_write(write_buf);
+        } else {
+            let mut kernel_buf = vec![0u8; count];
+            unsafe {
+                Uaccess::user_access_begin();
+                core::ptr::copy_nonoverlapping(buf_ptr as *const u8, kernel_buf.as_mut_ptr(), count);
+                Uaccess::user_access_end();
+            }
+            console_write(&kernel_buf);
+        }
+        return count as i64;
+    }
+
+    // Get file from fd table
+    let file = match current_fd_table().lock().get(fd) {
+        Some(f) => f,
+        None => return EBADF,
+    };
+
+    // Check RLIMIT_FSIZE for regular files (files with inodes)
+    // Pipes and special files don't have size limits
+    if file.get_inode().is_some()
+        && let Err(e) = check_fsize_limit(file.get_pos(), count)
+    {
+        return e;
+    }
+
     // Use stack buffer for small writes to avoid heap allocation
     if count <= SMALL_BUF_SIZE {
         let mut stack_buf = [0u8; SMALL_BUF_SIZE];
@@ -496,18 +594,6 @@ pub fn sys_write(fd: i32, buf_ptr: u64, count: u64) -> i64 {
             core::ptr::copy_nonoverlapping(buf_ptr as *const u8, write_buf.as_mut_ptr(), count);
             Uaccess::user_access_end();
         }
-
-        // Handle special fds (stdout, stderr)
-        if fd == 1 || fd == 2 {
-            console_write(&write_buf[..count]);
-            return count as i64;
-        }
-
-        // Get file from fd table
-        let file = match current_fd_table().lock().get(fd) {
-            Some(f) => f,
-            None => return EBADF,
-        };
 
         // Perform write
         match file.write(write_buf) {
@@ -525,18 +611,6 @@ pub fn sys_write(fd: i32, buf_ptr: u64, count: u64) -> i64 {
             core::ptr::copy_nonoverlapping(buf_ptr as *const u8, kernel_buf.as_mut_ptr(), count);
             Uaccess::user_access_end();
         }
-
-        // Handle special fds (stdout, stderr)
-        if fd == 1 || fd == 2 {
-            console_write(&kernel_buf);
-            return count as i64;
-        }
-
-        // Get file from fd table
-        let file = match current_fd_table().lock().get(fd) {
-            Some(f) => f,
-            None => return EBADF,
-        };
 
         // Perform write
         match file.write(&kernel_buf) {
@@ -665,6 +739,24 @@ pub fn sys_pwrite64(fd: i32, buf_ptr: u64, count: u64, offset: i64) -> i64 {
         return EFAULT;
     }
 
+    // Handle special fds (stdout, stderr) - not supported for pwrite
+    if fd == 1 || fd == 2 {
+        return ESPIPE; // stdout/stderr are not seekable
+    }
+
+    // Get file from fd table
+    let file = match current_fd_table().lock().get(fd) {
+        Some(f) => f,
+        None => return EBADF,
+    };
+
+    // Check RLIMIT_FSIZE for regular files (pwrite uses explicit offset)
+    if file.get_inode().is_some()
+        && let Err(e) = check_fsize_limit(offset, count)
+    {
+        return e;
+    }
+
     // Use stack buffer for small writes to avoid heap allocation
     if count <= SMALL_BUF_SIZE {
         let mut stack_buf = [0u8; SMALL_BUF_SIZE];
@@ -676,17 +768,6 @@ pub fn sys_pwrite64(fd: i32, buf_ptr: u64, count: u64, offset: i64) -> i64 {
             core::ptr::copy_nonoverlapping(buf_ptr as *const u8, write_buf.as_mut_ptr(), count);
             Uaccess::user_access_end();
         }
-
-        // Handle special fds (stdout, stderr) - not supported for pwrite
-        if fd == 1 || fd == 2 {
-            return ESPIPE; // stdout/stderr are not seekable
-        }
-
-        // Get file from fd table
-        let file = match current_fd_table().lock().get(fd) {
-            Some(f) => f,
-            None => return EBADF,
-        };
 
         // Perform positioned write
         match file.pwrite(write_buf, offset) {
@@ -705,17 +786,6 @@ pub fn sys_pwrite64(fd: i32, buf_ptr: u64, count: u64, offset: i64) -> i64 {
             core::ptr::copy_nonoverlapping(buf_ptr as *const u8, kernel_buf.as_mut_ptr(), count);
             Uaccess::user_access_end();
         }
-
-        // Handle special fds (stdout, stderr) - not supported for pwrite
-        if fd == 1 || fd == 2 {
-            return ESPIPE; // stdout/stderr are not seekable
-        }
-
-        // Get file from fd table
-        let file = match current_fd_table().lock().get(fd) {
-            Some(f) => f,
-            None => return EBADF,
-        };
 
         // Perform positioned write
         match file.pwrite(&kernel_buf, offset) {
@@ -1538,6 +1608,17 @@ pub fn sys_ftruncate(fd: i32, length: i64) -> i64 {
         None => return EBADF,
     };
 
+    // Check RLIMIT_FSIZE when extending the file
+    let current_size = inode.get_size();
+    if (length as u64) > current_size {
+        let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_FSIZE);
+        if limit != crate::rlimit::RLIM_INFINITY && (length as u64) > limit {
+            let tid = current_tid();
+            crate::signal::send_signal(tid, crate::signal::SIGXFSZ);
+            return EFBIG;
+        }
+    }
+
     // Perform truncate
     match inode.i_op.truncate(&inode, length as u64) {
         Ok(()) => 0,
@@ -1585,6 +1666,17 @@ pub fn sys_truncate(path_ptr: u64, length: i64) -> i64 {
         None => return ENOENT,
     };
 
+    // Check RLIMIT_FSIZE when extending the file
+    let current_size = inode.get_size();
+    if (length as u64) > current_size {
+        let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_FSIZE);
+        if limit != crate::rlimit::RLIM_INFINITY && (length as u64) > limit {
+            let tid = current_tid();
+            crate::signal::send_signal(tid, crate::signal::SIGXFSZ);
+            return EFBIG;
+        }
+    }
+
     // Perform truncate
     match inode.i_op.truncate(&inode, length as u64) {
         Ok(()) => 0,
@@ -1612,6 +1704,12 @@ pub fn sys_dup(oldfd: i32) -> i64 {
         Some(f) => f,
         None => return EBADF,
     };
+
+    // Check RLIMIT_NOFILE before allocating
+    if !check_nofile_limit(table.next_fd()) {
+        return EMFILE;
+    }
+
     let newfd = table.alloc(file);
     newfd as i64
 }
@@ -1629,6 +1727,11 @@ pub fn sys_dup(oldfd: i32) -> i64 {
 /// newfd on success, negative errno on error.
 pub fn sys_dup2(oldfd: i32, newfd: i32) -> i64 {
     if newfd < 0 {
+        return EBADF;
+    }
+
+    // Check RLIMIT_NOFILE for target fd
+    if !check_nofile_target(newfd) {
         return EBADF;
     }
 
@@ -1679,6 +1782,11 @@ pub fn sys_dup3(oldfd: i32, newfd: i32, flags: u32) -> i64 {
         return EINVAL;
     }
     if newfd < 0 {
+        return EBADF;
+    }
+
+    // Check RLIMIT_NOFILE for target fd
+    if !check_nofile_target(newfd) {
         return EBADF;
     }
 
@@ -4929,6 +5037,17 @@ pub fn sys_pipe2(pipefd: u64, flags: u32) -> i64 {
         return EFAULT;
     }
 
+    // Check RLIMIT_NOFILE - need room for 2 fds
+    {
+        let fd_table = current_fd_table();
+        let table = fd_table.lock();
+        let next_fd = table.next_fd();
+        // Need two consecutive fds
+        if !check_nofile_limit(next_fd) || !check_nofile_limit(next_fd + 1) {
+            return EMFILE;
+        }
+    }
+
     // Create the pipe
     let (read_file, write_file) = match create_pipe(flags & O_NONBLOCK) {
         Ok((r, w)) => (r, w),
@@ -5011,7 +5130,16 @@ pub fn sys_fcntl(fd: i32, cmd: i32, arg: u64) -> i64 {
             if min_fd < 0 {
                 return EINVAL;
             }
+            // Check RLIMIT_NOFILE for minimum target fd
+            if !check_nofile_target(min_fd) {
+                return EINVAL; // Linux returns EINVAL if arg >= RLIMIT_NOFILE
+            }
             let new_fd = table.alloc_at_or_above(file, min_fd, 0);
+            // Verify allocated fd is still within limit
+            if !check_nofile_target(new_fd) {
+                table.close(new_fd);
+                return EMFILE;
+            }
             new_fd as i64
         }
 
@@ -5025,7 +5153,16 @@ pub fn sys_fcntl(fd: i32, cmd: i32, arg: u64) -> i64 {
             if min_fd < 0 {
                 return EINVAL;
             }
+            // Check RLIMIT_NOFILE for minimum target fd
+            if !check_nofile_target(min_fd) {
+                return EINVAL; // Linux returns EINVAL if arg >= RLIMIT_NOFILE
+            }
             let new_fd = table.alloc_at_or_above(file, min_fd, crate::task::FD_CLOEXEC);
+            // Verify allocated fd is still within limit
+            if !check_nofile_target(new_fd) {
+                table.close(new_fd);
+                return EMFILE;
+            }
             new_fd as i64
         }
 

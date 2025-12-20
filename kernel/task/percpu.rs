@@ -669,6 +669,21 @@ pub fn do_clone<FA: FrameAlloc<PhysAddr = u64>>(
         return Err(22); // EINVAL
     }
 
+    // Check RLIMIT_NPROC for new processes (not threads)
+    // CAP_SYS_RESOURCE bypasses this limit
+    if config.flags & CLONE_THREAD == 0
+        && !crate::task::capable(crate::task::CAP_SYS_RESOURCE)
+    {
+        let cred = current_cred();
+        let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_NPROC);
+        if limit != crate::rlimit::RLIM_INFINITY {
+            let count = crate::task::get_user_process_count(cred.uid);
+            if count >= limit {
+                return Err(11); // EAGAIN - resource temporarily unavailable
+            }
+        }
+    }
+
     // Get current CPU ID
     let cpu_id = CurrentArch::try_current_cpu_id().unwrap_or(0);
 
@@ -908,6 +923,12 @@ pub fn do_clone<FA: FrameAlloc<PhysAddr = u64>>(
         wait_for_vfork(child_tid);
     }
 
+    // Increment user process count for new processes (not threads)
+    if config.flags & CLONE_THREAD == 0 {
+        let cred = current_cred();
+        crate::task::increment_user_process_count(cred.uid);
+    }
+
     // Return value depends on CLONE_THREAD flag:
     // - CLONE_THREAD: return child TID (thread in same process)
     // - No CLONE_THREAD: return child PID (new process)
@@ -931,6 +952,19 @@ pub fn exit_current() -> ! {
     if let Some(tid) = current_tid {
         rq.contexts.retain(|(t, _)| *t != tid);
         rq.nr_running = rq.nr_running.saturating_sub(1);
+
+        // Decrement user process count for process exits (thread group leader)
+        // A process exits when tid == pid (thread group leader)
+        {
+            let table = TASK_TABLE.lock();
+            if let Some(task) = table.tasks.iter().find(|t| t.tid == tid) {
+                // Thread group leader: tid == pid
+                if task.tid == task.pid {
+                    let cred = current_cred();
+                    crate::task::decrement_user_process_count(cred.uid);
+                }
+            }
+        }
 
         // Clean up filesystem context for exiting task
         crate::fs::exit_task_fs(tid);

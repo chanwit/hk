@@ -501,6 +501,18 @@ impl<F> FdTable<F> {
             next_fd: self.next_fd,
         }
     }
+
+    /// Get the number of open file descriptors
+    pub fn count(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Get the next fd that would be allocated
+    ///
+    /// Used for RLIMIT_NOFILE enforcement.
+    pub fn next_fd(&self) -> Fd {
+        self.next_fd
+    }
 }
 
 impl<F> Default for FdTable<F> {
@@ -562,4 +574,73 @@ impl<A: Arch, PT: PageTable<VirtAddr = A::VirtAddr, PhysAddr = A::PhysAddr>> Tas
     pub fn add_cached_page(&mut self, page: Arc<CachedPage>) {
         self.cached_pages.push(page);
     }
+}
+
+// =============================================================================
+// Linux capability constants (subset)
+// =============================================================================
+
+/// CAP_IPC_LOCK - Lock memory (mlock, mlockall, etc.)
+pub const CAP_IPC_LOCK: u32 = 14;
+/// CAP_SYS_ADMIN - System administration capabilities
+pub const CAP_SYS_ADMIN: u32 = 21;
+/// CAP_SYS_NICE - Raise process nice value, set real-time priorities
+pub const CAP_SYS_NICE: u32 = 23;
+/// CAP_SYS_RESOURCE - Override resource limits
+pub const CAP_SYS_RESOURCE: u32 = 24;
+
+/// Check if the current task has a specific capability
+///
+/// Currently simplified: all capabilities are granted when euid == 0 (root).
+/// A full capability system would track per-task capability bitmasks.
+///
+/// # Arguments
+/// * `_cap` - The capability constant (CAP_IPC_LOCK, CAP_SYS_RESOURCE, etc.)
+///
+/// # Returns
+/// true if the current task has the capability
+#[allow(unused_variables)]
+pub fn capable(_cap: u32) -> bool {
+    percpu::current_cred().euid == 0
+}
+
+// =============================================================================
+// Per-UID process counting (for RLIMIT_NPROC)
+// =============================================================================
+
+use spin::Mutex;
+
+/// Global table tracking process count per UID
+///
+/// Used for RLIMIT_NPROC enforcement. Each process (not thread) increments
+/// the count for its UID on creation and decrements on exit.
+static UID_PROCESS_COUNT: Mutex<BTreeMap<Uid, u64>> = Mutex::new(BTreeMap::new());
+
+/// Increment the process count for a UID
+///
+/// Called when a new process (not thread) is created successfully.
+pub fn increment_user_process_count(uid: Uid) {
+    let mut counts = UID_PROCESS_COUNT.lock();
+    *counts.entry(uid).or_insert(0) += 1;
+}
+
+/// Decrement the process count for a UID
+///
+/// Called when a process exits. Safe to call even if count is already 0.
+pub fn decrement_user_process_count(uid: Uid) {
+    let mut counts = UID_PROCESS_COUNT.lock();
+    if let Some(count) = counts.get_mut(&uid) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(&uid);
+        }
+    }
+}
+
+/// Get the current process count for a UID
+///
+/// Used by RLIMIT_NPROC enforcement before creating a new process.
+pub fn get_user_process_count(uid: Uid) -> u64 {
+    let counts = UID_PROCESS_COUNT.lock();
+    counts.get(&uid).copied().unwrap_or(0)
 }
