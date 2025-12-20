@@ -1208,9 +1208,7 @@ pub fn x86_64_syscall_dispatch(
         // Resource limits
         SYS_GETRLIMIT => crate::rlimit::sys_getrlimit(arg0 as u32, arg1) as u64,
         SYS_SETRLIMIT => crate::rlimit::sys_setrlimit(arg0 as u32, arg1) as u64,
-        SYS_PRLIMIT64 => {
-            crate::rlimit::sys_prlimit64(arg0 as i32, arg1 as u32, arg2, arg3) as u64
-        }
+        SYS_PRLIMIT64 => crate::rlimit::sys_prlimit64(arg0 as i32, arg1 as u32, arg2, arg3) as u64,
 
         _ => (-38i64) as u64, // ENOSYS
     }

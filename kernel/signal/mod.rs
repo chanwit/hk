@@ -534,7 +534,9 @@ pub fn init_task_signal(tid: Tid, sighand: Arc<SigHand>) {
         .lock()
         .insert(tid, AtomicBool::new(false));
     // Initialize SignalStruct for new processes (contains rlimits)
-    TASK_SIGNAL.lock().insert(tid, Arc::new(SignalStruct::new()));
+    TASK_SIGNAL
+        .lock()
+        .insert(tid, Arc::new(SignalStruct::new()));
 }
 
 /// Get a task's signal handlers
@@ -827,7 +829,7 @@ const SIGPOLL: u32 = SIGIO;
 // SignalStruct - Per-Process Structure (mirrors Linux signal_struct)
 // =============================================================================
 
-use crate::rlimit::{default_rlimits, RLimit, RLIM_NLIMITS};
+use crate::rlimit::{RLIM_NLIMITS, RLimit, default_rlimits};
 
 /// Per-process signal structure (mirrors Linux signal_struct)
 ///

@@ -20,8 +20,8 @@
 #![allow(dead_code)]
 
 use crate::signal::get_task_signal_struct;
-use crate::task::percpu::{current_tid, current_cred};
 use crate::task::Tid;
+use crate::task::percpu::{current_cred, current_tid};
 
 // =============================================================================
 // Resource Limit Constants (Linux ABI)
@@ -115,22 +115,22 @@ impl Default for RLimit {
 /// These defaults are used when creating a new process.
 pub fn default_rlimits() -> [RLimit; RLIM_NLIMITS] {
     [
-        RLimit::INFINITY,                                       // RLIMIT_CPU
-        RLimit::INFINITY,                                       // RLIMIT_FSIZE
-        RLimit::INFINITY,                                       // RLIMIT_DATA
-        RLimit::new(8 * 1024 * 1024, RLIM_INFINITY),            // RLIMIT_STACK (8MB soft)
-        RLimit::new(0, RLIM_INFINITY),                          // RLIMIT_CORE (0 = no core)
-        RLimit::INFINITY,                                       // RLIMIT_RSS
-        RLimit::INFINITY,                                       // RLIMIT_NPROC
-        RLimit::new(1024, 1024 * 1024),                         // RLIMIT_NOFILE (1024 soft, 1M hard)
-        RLimit::new(8 * 1024 * 1024, 8 * 1024 * 1024),          // RLIMIT_MEMLOCK (8MB)
-        RLimit::INFINITY,                                       // RLIMIT_AS
-        RLimit::INFINITY,                                       // RLIMIT_LOCKS
-        RLimit::new(0, 0),                                      // RLIMIT_SIGPENDING
-        RLimit::new(819200, 819200),                            // RLIMIT_MSGQUEUE
-        RLimit::new(0, 0),                                      // RLIMIT_NICE
-        RLimit::new(0, 0),                                      // RLIMIT_RTPRIO
-        RLimit::INFINITY,                                       // RLIMIT_RTTIME
+        RLimit::INFINITY,                              // RLIMIT_CPU
+        RLimit::INFINITY,                              // RLIMIT_FSIZE
+        RLimit::INFINITY,                              // RLIMIT_DATA
+        RLimit::new(8 * 1024 * 1024, RLIM_INFINITY),   // RLIMIT_STACK (8MB soft)
+        RLimit::new(0, RLIM_INFINITY),                 // RLIMIT_CORE (0 = no core)
+        RLimit::INFINITY,                              // RLIMIT_RSS
+        RLimit::INFINITY,                              // RLIMIT_NPROC
+        RLimit::new(1024, 1024 * 1024),                // RLIMIT_NOFILE (1024 soft, 1M hard)
+        RLimit::new(8 * 1024 * 1024, 8 * 1024 * 1024), // RLIMIT_MEMLOCK (8MB)
+        RLimit::INFINITY,                              // RLIMIT_AS
+        RLimit::INFINITY,                              // RLIMIT_LOCKS
+        RLimit::new(0, 0),                             // RLIMIT_SIGPENDING
+        RLimit::new(819200, 819200),                   // RLIMIT_MSGQUEUE
+        RLimit::new(0, 0),                             // RLIMIT_NICE
+        RLimit::new(0, 0),                             // RLIMIT_RTPRIO
+        RLimit::INFINITY,                              // RLIMIT_RTTIME
     ]
 }
 
@@ -198,7 +198,6 @@ fn find_task_by_pid(pid: u64) -> Option<Tid> {
     let table = crate::task::percpu::TASK_TABLE.lock();
     table.tasks.iter().find(|t| t.pid == pid).map(|t| t.tid)
 }
-
 
 /// sys_getrlimit - get resource limits
 ///

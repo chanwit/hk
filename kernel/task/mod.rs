@@ -619,9 +619,12 @@ static UID_PROCESS_COUNT: Mutex<BTreeMap<Uid, u64>> = Mutex::new(BTreeMap::new()
 /// Increment the process count for a UID
 ///
 /// Called when a new process (not thread) is created successfully.
-pub fn increment_user_process_count(uid: Uid) {
+/// Returns the new count after incrementing.
+pub fn increment_user_process_count(uid: Uid) -> u64 {
     let mut counts = UID_PROCESS_COUNT.lock();
-    *counts.entry(uid).or_insert(0) += 1;
+    let count = counts.entry(uid).or_insert(0);
+    *count += 1;
+    *count
 }
 
 /// Decrement the process count for a UID

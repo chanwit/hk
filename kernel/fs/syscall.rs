@@ -561,7 +561,11 @@ pub fn sys_write(fd: i32, buf_ptr: u64, count: u64) -> i64 {
             let mut kernel_buf = vec![0u8; count];
             unsafe {
                 Uaccess::user_access_begin();
-                core::ptr::copy_nonoverlapping(buf_ptr as *const u8, kernel_buf.as_mut_ptr(), count);
+                core::ptr::copy_nonoverlapping(
+                    buf_ptr as *const u8,
+                    kernel_buf.as_mut_ptr(),
+                    count,
+                );
                 Uaccess::user_access_end();
             }
             console_write(&kernel_buf);
