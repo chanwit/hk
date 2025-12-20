@@ -10,8 +10,9 @@ use crate::task::fdtable::get_task_fd;
 use crate::task::percpu::current_tid;
 
 use super::{
-    MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PAGE_SIZE, PROT_READ, PROT_WRITE, VM_LOCKED,
-    VM_LOCKED_MASK, VM_LOCKONFAULT, Vma, create_default_mm, get_task_mm, init_task_mm,
+    MAP_ANONYMOUS, MAP_FIXED, MAP_LOCKED, MAP_PRIVATE, MAP_SHARED, PAGE_SIZE, PROT_READ,
+    PROT_WRITE, VM_LOCKED, VM_LOCKED_MASK, VM_LOCKONFAULT, Vma, create_default_mm, get_task_mm,
+    init_task_mm,
 };
 
 // Error codes (negative errno)
@@ -146,9 +147,29 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
         Vma::new(map_addr, map_addr + length, prot, flags | MAP_ANONYMOUS)
     };
 
+    // Handle MAP_LOCKED flag - lock pages in memory
+    // Linux: do_mmap() checks can_do_mlock() and mlock_future_ok()
+    let is_map_locked = flags & MAP_LOCKED != 0;
+    if is_map_locked {
+        // Permission check (stub - always allows for now)
+        // TODO: Check RLIMIT_MEMLOCK when rlimits are implemented
+        if !can_do_mlock() {
+            return EPERM;
+        }
+
+        // Set VM_LOCKED on the VMA (MAP_LOCKED and VM_LOCKED have same value 0x2000,
+        // but we set explicitly for clarity like Linux's calc_vm_flag_bits)
+        vma.flags |= VM_LOCKED;
+        let pages = length / PAGE_SIZE;
+        mm_guard.add_locked_vm(pages);
+    }
+
     // Apply def_flags if MCL_FUTURE was set via mlockall
+    // (This may add VM_LOCKED again if both MAP_LOCKED and MCL_FUTURE are set,
+    // but that's fine - the flag is already set, we just update locked_vm count)
     let def_flags = mm_guard.def_flags();
-    if def_flags != 0 {
+    if def_flags != 0 && !is_map_locked {
+        // Only apply def_flags if not already locked via MAP_LOCKED
         vma.flags |= def_flags;
         let pages = length / PAGE_SIZE;
         mm_guard.add_locked_vm(pages);
@@ -156,8 +177,9 @@ pub fn sys_mmap(addr: u64, length: u64, prot: u32, flags: u32, fd: i32, offset: 
 
     mm_guard.insert_vma(vma);
 
-    // If MCL_FUTURE with immediate locking (not ONFAULT), populate now
-    let should_populate = def_flags != 0 && (def_flags & VM_LOCKONFAULT == 0);
+    // Populate pages if locked (MAP_LOCKED or MCL_FUTURE without ONFAULT)
+    // Linux: do_mmap() sets *populate = len if VM_LOCKED is set
+    let should_populate = is_map_locked || (def_flags != 0 && (def_flags & VM_LOCKONFAULT == 0));
 
     // Release lock before potential page faults
     drop(mm_guard);

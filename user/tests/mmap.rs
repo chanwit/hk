@@ -11,7 +11,7 @@ use super::helpers::{print, println, print_num};
 use crate::syscall::{
     sys_mmap, sys_munmap, sys_mlock, sys_mlock2, sys_munlock,
     sys_mlockall, sys_munlockall,
-    MAP_ANONYMOUS, MAP_PRIVATE,
+    MAP_ANONYMOUS, MAP_LOCKED, MAP_PRIVATE,
     PROT_READ, PROT_WRITE,
     MLOCK_ONFAULT, MCL_CURRENT, MCL_ONFAULT,
 };
@@ -22,6 +22,7 @@ pub fn run_tests() {
     test_mmap_write_read();
     test_munmap();
     test_large_anonymous_mmap();
+    test_mmap_locked();
     // mlock tests
     test_mlock_basic();
     test_mlock2_onfault();
@@ -186,6 +187,43 @@ fn test_large_anonymous_mmap() {
     if success {
         println(b"MMAP_LARGE:OK");
     }
+}
+
+/// Test: mmap with MAP_LOCKED flag (Linux ABI compliance)
+fn test_mmap_locked() {
+    // Map with MAP_LOCKED - pages should be locked in memory
+    let ptr = sys_mmap(
+        0,
+        4096,
+        PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_LOCKED,
+        -1,
+        0,
+    );
+
+    if ptr < 0 {
+        print(b"MMAP_LOCKED:FAIL mmap errno=");
+        print_num(-ptr);
+        println(b"");
+        return;
+    }
+
+    // Write to verify it's accessible (should be locked/populated)
+    unsafe {
+        core::ptr::write_volatile(ptr as *mut u8, 42);
+    }
+
+    let val = unsafe { core::ptr::read_volatile(ptr as *const u8) };
+    if val != 42 {
+        print(b"MMAP_LOCKED:FAIL read mismatch got ");
+        print_num(val as i64);
+        println(b"");
+        sys_munmap(ptr as u64, 4096);
+        return;
+    }
+
+    sys_munmap(ptr as u64, 4096);
+    println(b"MMAP_LOCKED:OK");
 }
 
 // ============================================================================

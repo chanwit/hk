@@ -60,7 +60,7 @@ int munmap(void *addr, size_t length);
 | MAP_FIXED | 0x10 | Use exact address | Implemented |
 | MAP_ANONYMOUS | 0x20 | No file backing | Implemented |
 | MAP_GROWSDOWN | 0x100 | Stack-like growth | Not implemented |
-| MAP_LOCKED | 0x2000 | Lock pages in memory | Via mlock syscalls |
+| MAP_LOCKED | 0x2000 | Lock pages in memory | Implemented |
 | MAP_NORESERVE | 0x4000 | Don't reserve swap | Not implemented |
 | MAP_POPULATE | 0x8000 | Prefault pages | Not implemented |
 | MAP_HUGETLB | 0x40000 | Use huge pages | Not implemented |
