@@ -389,15 +389,27 @@ impl<F> FdTable<F> {
         }
     }
 
-    /// Allocate a file descriptor for a file
-    pub fn alloc(&mut self, file: Arc<F>) -> Fd {
+    /// Allocate a file descriptor for a file.
+    ///
+    /// The `nofile` parameter is the RLIMIT_NOFILE limit. If the allocated fd
+    /// would be >= nofile, returns Err(EMFILE). Pass `u64::MAX` to disable limit.
+    ///
+    /// Following Linux pattern: RLIMIT_NOFILE is enforced inside allocation.
+    pub fn alloc(&mut self, file: Arc<F>, nofile: u64) -> Result<Fd, i32> {
         let fd = self.next_fd;
+        // RLIMIT_NOFILE enforcement
+        if (fd as u64) >= nofile {
+            return Err(24); // EMFILE - too many open files
+        }
         self.files.insert(fd, file);
         self.next_fd += 1;
-        fd
+        Ok(fd)
     }
 
-    /// Allocate a specific file descriptor (for stdin/stdout/stderr)
+    /// Allocate a specific file descriptor (for stdin/stdout/stderr).
+    ///
+    /// This does NOT enforce RLIMIT_NOFILE as it's used for initial fd setup
+    /// (stdin=0, stdout=1, stderr=2) where limits don't apply.
     pub fn alloc_at(&mut self, fd: Fd, file: Arc<F>) -> bool {
         if self.files.contains_key(&fd) {
             return false;
@@ -427,37 +439,63 @@ impl<F> FdTable<F> {
         self.files.keys()
     }
 
-    /// Allocate a file descriptor with specific fd flags
-    pub fn alloc_with_flags(&mut self, file: Arc<F>, flags: u32) -> Fd {
+    /// Allocate a file descriptor with specific fd flags.
+    ///
+    /// The `nofile` parameter is the RLIMIT_NOFILE limit. If the allocated fd
+    /// would be >= nofile, returns Err(EMFILE). Pass `u64::MAX` to disable limit.
+    ///
+    /// Following Linux pattern: RLIMIT_NOFILE is enforced inside allocation,
+    /// not as a separate pre-check. This avoids TOCTOU races.
+    pub fn alloc_with_flags(&mut self, file: Arc<F>, flags: u32, nofile: u64) -> Result<Fd, i32> {
         let fd = self.next_fd;
+        // RLIMIT_NOFILE enforcement (Linux: alloc_fd checks fd >= end)
+        if (fd as u64) >= nofile {
+            return Err(24); // EMFILE - too many open files
+        }
         self.files.insert(fd, file);
         if flags != 0 {
             self.fd_flags.insert(fd, flags);
         }
         self.next_fd += 1;
-        fd
+        Ok(fd)
     }
 
-    /// Allocate a specific file descriptor with flags
-    pub fn alloc_at_with_flags(&mut self, fd: Fd, file: Arc<F>, flags: u32) -> bool {
+    /// Allocate a specific file descriptor with flags.
+    ///
+    /// The `nofile` parameter is the RLIMIT_NOFILE limit. If fd >= nofile,
+    /// returns Err(EMFILE). Pass `u64::MAX` to disable limit.
+    ///
+    /// Returns Err(EBADF) if the fd is already in use.
+    pub fn alloc_at_with_flags(&mut self, fd: Fd, file: Arc<F>, flags: u32, nofile: u64) -> Result<(), i32> {
+        // RLIMIT_NOFILE enforcement
+        if (fd as u64) >= nofile {
+            return Err(24); // EMFILE - too many open files
+        }
         if self.files.contains_key(&fd) {
-            return false;
+            return Err(9); // EBADF - fd already in use
         }
         self.files.insert(fd, file);
         if flags != 0 {
             self.fd_flags.insert(fd, flags);
         }
-        true
+        Ok(())
     }
 
-    /// Allocate a file descriptor at or above min_fd (for F_DUPFD)
+    /// Allocate a file descriptor at or above min_fd (for F_DUPFD).
     ///
     /// Finds the lowest available fd >= min_fd and allocates the file there.
-    /// Returns the allocated fd number.
-    pub fn alloc_at_or_above(&mut self, file: Arc<F>, min_fd: Fd, flags: u32) -> Fd {
+    /// The `nofile` parameter is the RLIMIT_NOFILE limit. If the found fd
+    /// would be >= nofile, returns Err(EMFILE).
+    ///
+    /// Following Linux pattern: RLIMIT_NOFILE is enforced inside allocation.
+    pub fn alloc_at_or_above(&mut self, file: Arc<F>, min_fd: Fd, flags: u32, nofile: u64) -> Result<Fd, i32> {
         let mut fd = min_fd;
         while self.files.contains_key(&fd) {
             fd += 1;
+        }
+        // RLIMIT_NOFILE enforcement
+        if (fd as u64) >= nofile {
+            return Err(24); // EMFILE - too many open files
         }
         self.files.insert(fd, file);
         if flags != 0 {
@@ -466,7 +504,7 @@ impl<F> FdTable<F> {
         if fd >= self.next_fd {
             self.next_fd = fd + 1;
         }
-        fd
+        Ok(fd)
     }
 
     /// Get fd flags for a file descriptor

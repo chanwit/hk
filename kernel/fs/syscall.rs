@@ -59,23 +59,21 @@ const IOV_MAX: usize = 1024;
 // RLIMIT_NOFILE enforcement helpers
 // =============================================================================
 
-/// Check if allocating a new fd would exceed RLIMIT_NOFILE
+/// Get the RLIMIT_NOFILE limit for the current task.
 ///
-/// Returns true if the allocation would succeed, false if it would exceed the limit.
-/// The `next_fd` parameter should be the fd number that would be allocated.
-#[inline]
-fn check_nofile_limit(next_fd: i32) -> bool {
-    let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_NOFILE);
-    limit == crate::rlimit::RLIM_INFINITY || (next_fd as u64) < limit
-}
-
-/// Check if a specific target fd is within RLIMIT_NOFILE
+/// Returns the soft limit, or u64::MAX if the limit is RLIM_INFINITY.
+/// This value is passed to fd allocation functions which enforce the limit.
 ///
-/// Returns true if the fd is valid for use, false if it exceeds the limit.
+/// Following Linux pattern: RLIMIT_NOFILE is enforced inside fd allocation
+/// functions (alloc, alloc_with_flags, etc.), not as separate pre-checks.
 #[inline]
-fn check_nofile_target(target_fd: i32) -> bool {
+fn get_nofile_limit() -> u64 {
     let limit = crate::rlimit::rlimit(crate::rlimit::RLIMIT_NOFILE);
-    limit == crate::rlimit::RLIM_INFINITY || (target_fd as u64) < limit
+    if limit == crate::rlimit::RLIM_INFINITY {
+        u64::MAX
+    } else {
+        limit
+    }
 }
 
 // =============================================================================
@@ -323,17 +321,14 @@ pub fn sys_openat(dirfd: i32, path_ptr: u64, flags: u32, mode: u32) -> i64 {
     // Create file object
     let file = Arc::new(File::new(dentry, flags, f_op));
 
-    // Allocate file descriptor (with RLIMIT_NOFILE check)
+    // Allocate file descriptor (RLIMIT_NOFILE enforced inside alloc)
     let fd_table = current_fd_table();
     let mut table = fd_table.lock();
 
-    // Check RLIMIT_NOFILE before allocating
-    if !check_nofile_limit(table.next_fd()) {
-        return EMFILE;
+    match table.alloc(file, get_nofile_limit()) {
+        Ok(fd) => fd as i64,
+        Err(e) => -(e as i64),
     }
-
-    let fd = table.alloc(file);
-    fd as i64
 }
 
 /// sys_chdir - change working directory
@@ -1709,13 +1704,11 @@ pub fn sys_dup(oldfd: i32) -> i64 {
         None => return EBADF,
     };
 
-    // Check RLIMIT_NOFILE before allocating
-    if !check_nofile_limit(table.next_fd()) {
-        return EMFILE;
+    // Allocate fd (RLIMIT_NOFILE enforced inside alloc)
+    match table.alloc(file, get_nofile_limit()) {
+        Ok(newfd) => newfd as i64,
+        Err(e) => -(e as i64),
     }
-
-    let newfd = table.alloc(file);
-    newfd as i64
 }
 
 /// sys_dup2 - duplicate a file descriptor to a specific number
@@ -1731,11 +1724,6 @@ pub fn sys_dup(oldfd: i32) -> i64 {
 /// newfd on success, negative errno on error.
 pub fn sys_dup2(oldfd: i32, newfd: i32) -> i64 {
     if newfd < 0 {
-        return EBADF;
-    }
-
-    // Check RLIMIT_NOFILE for target fd
-    if !check_nofile_target(newfd) {
         return EBADF;
     }
 
@@ -1760,11 +1748,10 @@ pub fn sys_dup2(oldfd: i32, newfd: i32) -> i64 {
     // Close newfd if open (silently ignore errors)
     table.close(newfd);
 
-    // Allocate at specific fd
-    if table.alloc_at(newfd, file) {
-        newfd as i64
-    } else {
-        EBADF // Should not happen after close
+    // Allocate at specific fd (RLIMIT_NOFILE enforced inside)
+    match table.alloc_at_with_flags(newfd, file, 0, get_nofile_limit()) {
+        Ok(()) => newfd as i64,
+        Err(e) => -(e as i64),
     }
 }
 
@@ -1786,11 +1773,6 @@ pub fn sys_dup3(oldfd: i32, newfd: i32, flags: u32) -> i64 {
         return EINVAL;
     }
     if newfd < 0 {
-        return EBADF;
-    }
-
-    // Check RLIMIT_NOFILE for target fd
-    if !check_nofile_target(newfd) {
         return EBADF;
     }
 
@@ -1816,10 +1798,10 @@ pub fn sys_dup3(oldfd: i32, newfd: i32, flags: u32) -> i64 {
         0
     };
 
-    if table.alloc_at_with_flags(newfd, file, fd_flags) {
-        newfd as i64
-    } else {
-        EBADF
+    // Allocate at specific fd (RLIMIT_NOFILE enforced inside)
+    match table.alloc_at_with_flags(newfd, file, fd_flags, get_nofile_limit()) {
+        Ok(()) => newfd as i64,
+        Err(e) => -(e as i64),
     }
 }
 
@@ -5041,26 +5023,17 @@ pub fn sys_pipe2(pipefd: u64, flags: u32) -> i64 {
         return EFAULT;
     }
 
-    // Check RLIMIT_NOFILE - need room for 2 fds
-    {
-        let fd_table = current_fd_table();
-        let table = fd_table.lock();
-        let next_fd = table.next_fd();
-        // Need two consecutive fds
-        if !check_nofile_limit(next_fd) || !check_nofile_limit(next_fd + 1) {
-            return EMFILE;
-        }
-    }
-
     // Create the pipe
     let (read_file, write_file) = match create_pipe(flags & O_NONBLOCK) {
         Ok((r, w)) => (r, w),
         Err(_) => return ENOMEM,
     };
 
-    // Allocate file descriptors
+    // Allocate file descriptors (RLIMIT_NOFILE enforced inside alloc)
+    // Following Linux pattern: each get_unused_fd_flags() call checks limit
     let fd_table = current_fd_table();
     let mut table = fd_table.lock();
+    let nofile = get_nofile_limit();
 
     // Determine fd flags
     let fd_flags = if flags & O_CLOEXEC != 0 {
@@ -5069,8 +5042,19 @@ pub fn sys_pipe2(pipefd: u64, flags: u32) -> i64 {
         0
     };
 
-    let read_fd = table.alloc_with_flags(read_file, fd_flags);
-    let write_fd = table.alloc_with_flags(write_file, fd_flags);
+    let read_fd = match table.alloc_with_flags(read_file, fd_flags, nofile) {
+        Ok(fd) => fd,
+        Err(e) => return -(e as i64),
+    };
+
+    let write_fd = match table.alloc_with_flags(write_file, fd_flags, nofile) {
+        Ok(fd) => fd,
+        Err(e) => {
+            // Clean up read fd on failure
+            table.close(read_fd);
+            return -(e as i64);
+        }
+    };
 
     drop(table);
 
@@ -5123,6 +5107,8 @@ pub fn sys_fcntl(fd: i32, cmd: i32, arg: u64) -> i64 {
     let fd_table = current_fd_table();
     let mut table = fd_table.lock();
 
+    let nofile = get_nofile_limit();
+
     match cmd {
         F_DUPFD => {
             // Duplicate fd to lowest available >= arg
@@ -5134,17 +5120,15 @@ pub fn sys_fcntl(fd: i32, cmd: i32, arg: u64) -> i64 {
             if min_fd < 0 {
                 return EINVAL;
             }
-            // Check RLIMIT_NOFILE for minimum target fd
-            if !check_nofile_target(min_fd) {
-                return EINVAL; // Linux returns EINVAL if arg >= RLIMIT_NOFILE
+            // Linux: if (from >= nofile) return -EINVAL
+            if (min_fd as u64) >= nofile {
+                return EINVAL;
             }
-            let new_fd = table.alloc_at_or_above(file, min_fd, 0);
-            // Verify allocated fd is still within limit
-            if !check_nofile_target(new_fd) {
-                table.close(new_fd);
-                return EMFILE;
+            // RLIMIT_NOFILE enforced inside alloc_at_or_above
+            match table.alloc_at_or_above(file, min_fd, 0, nofile) {
+                Ok(new_fd) => new_fd as i64,
+                Err(e) => -(e as i64),
             }
-            new_fd as i64
         }
 
         F_DUPFD_CLOEXEC => {
@@ -5157,17 +5141,15 @@ pub fn sys_fcntl(fd: i32, cmd: i32, arg: u64) -> i64 {
             if min_fd < 0 {
                 return EINVAL;
             }
-            // Check RLIMIT_NOFILE for minimum target fd
-            if !check_nofile_target(min_fd) {
-                return EINVAL; // Linux returns EINVAL if arg >= RLIMIT_NOFILE
+            // Linux: if (from >= nofile) return -EINVAL
+            if (min_fd as u64) >= nofile {
+                return EINVAL;
             }
-            let new_fd = table.alloc_at_or_above(file, min_fd, crate::task::FD_CLOEXEC);
-            // Verify allocated fd is still within limit
-            if !check_nofile_target(new_fd) {
-                table.close(new_fd);
-                return EMFILE;
+            // RLIMIT_NOFILE enforced inside alloc_at_or_above
+            match table.alloc_at_or_above(file, min_fd, crate::task::FD_CLOEXEC, nofile) {
+                Ok(new_fd) => new_fd as i64,
+                Err(e) => -(e as i64),
             }
-            new_fd as i64
         }
 
         F_GETFD => {
