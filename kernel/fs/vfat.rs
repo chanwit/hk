@@ -19,7 +19,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::frame_alloc::FrameAllocRef;
-use crate::mm::page_cache::{FileId, NULL_AOPS, PAGE_SIZE};
+use crate::mm::page_cache::{BLKDEV_AOPS, FileId, PAGE_SIZE};
 use crate::storage::BlockDevice;
 use crate::{FRAME_ALLOCATOR, PAGE_CACHE};
 
@@ -255,16 +255,16 @@ fn read_bytes(bdev: &BlockDevice, offset: u64, buf: &mut [u8]) -> Result<(), FsE
         let (frame, needs_read) = {
             let mut cache = PAGE_CACHE.lock();
             let mut frame_alloc = FrameAllocRef(&FRAME_ALLOCATOR);
-            // Use NULL_AOPS for read path (writeback handled separately)
+            // Use BLKDEV_AOPS for disk-backed page cache with writeback support
             let (page, is_new) = cache
                 .find_or_create_page(
                     file_id,
                     page_offset,
                     capacity,
                     &mut frame_alloc,
-                    true,  // can_writeback for vfat
+                    true,  // can_writeback: uses BLKDEV_AOPS for disk I/O
                     false, // not unevictable (disk-backed)
-                    &NULL_AOPS,
+                    &BLKDEV_AOPS,
                 )
                 .map_err(|_| FsError::IoError)?;
             (page.frame, is_new)
@@ -272,10 +272,11 @@ fn read_bytes(bdev: &BlockDevice, offset: u64, buf: &mut [u8]) -> Result<(), FsE
 
         // Read from block device AFTER releasing the lock
         if needs_read {
+            let page_buf = unsafe { core::slice::from_raw_parts_mut(frame as *mut u8, PAGE_SIZE) };
             bdev.disk
                 .queue
                 .driver()
-                .readpage(&bdev.disk, frame, page_offset);
+                .readpage(&bdev.disk, page_buf, page_offset);
         }
 
         // Copy data from page to buffer
@@ -319,9 +320,9 @@ fn write_bytes(bdev: &BlockDevice, offset: u64, buf: &[u8]) -> Result<(), FsErro
                     page_offset,
                     capacity,
                     &mut frame_alloc,
-                    true,  // can_writeback for vfat
+                    true,  // can_writeback: uses BLKDEV_AOPS for disk I/O
                     false, // not unevictable (disk-backed)
-                    &NULL_AOPS,
+                    &BLKDEV_AOPS,
                 )
                 .map_err(|_| FsError::IoError)?;
             (page, is_new)
@@ -329,10 +330,12 @@ fn write_bytes(bdev: &BlockDevice, offset: u64, buf: &[u8]) -> Result<(), FsErro
 
         // If this is a partial page write and the page is new, read existing data first
         if needs_read && (offset_in_page != 0 || chunk_size != PAGE_SIZE) {
+            let page_buf =
+                unsafe { core::slice::from_raw_parts_mut(page.frame as *mut u8, PAGE_SIZE) };
             bdev.disk
                 .queue
                 .driver()
-                .readpage(&bdev.disk, page.frame, page_offset);
+                .readpage(&bdev.disk, page_buf, page_offset);
         }
 
         // Write data to page
@@ -348,10 +351,11 @@ fn write_bytes(bdev: &BlockDevice, offset: u64, buf: &[u8]) -> Result<(), FsErro
         page.mark_dirty();
 
         // Write page to disk (write-through for now, will add proper writeback later)
+        let page_buf = unsafe { core::slice::from_raw_parts(page.frame as *const u8, PAGE_SIZE) };
         bdev.disk
             .queue
             .driver()
-            .writepage(&bdev.disk, page.frame, page_offset);
+            .writepage(&bdev.disk, page_buf, page_offset);
 
         pos += chunk_size as u64;
         buf_offset += chunk_size;
@@ -1061,20 +1065,8 @@ fn create_dir_entry_with_lfn(
 ) -> Result<[u8; 11], FsError> {
     // Get existing short names to avoid collisions
     let existing_entries = read_directory_entries(sb_data, parent_cluster)?;
-    let existing_short_names: Vec<[u8; 11]> = existing_entries
-        .iter()
-        .map(|e| {
-            let mut short = [b' '; 11];
-            // Extract short name from entry (simplified - use uppercase)
-            let upper = e.name.to_ascii_uppercase();
-            for (i, c) in upper.bytes().enumerate().take(11) {
-                if i < 11 {
-                    short[i] = c;
-                }
-            }
-            short
-        })
-        .collect();
+    let existing_short_names: Vec<[u8; 11]> =
+        existing_entries.iter().map(|e| e.short_name).collect();
 
     // Generate short name
     let short_name = generate_short_name(name, &existing_short_names);
@@ -1798,6 +1790,188 @@ impl InodeOps for VfatInodeOps {
         if start_cluster != 0 {
             free_cluster_chain(&sb_data, start_cluster)?;
         }
+
+        Ok(())
+    }
+
+    fn truncate(&self, inode: &Inode, length: u64) -> Result<(), FsError> {
+        let sb = inode.superblock().ok_or(FsError::IoError)?;
+        let sb_data = get_sb_data(&sb)?;
+        let inode_data = get_inode_data(inode)?;
+
+        // Directories cannot be truncated
+        if inode_data.is_dir {
+            return Err(FsError::IsADirectory);
+        }
+
+        // FAT32 file size limit is 4 GiB - 1 (u32::MAX)
+        if length > u32::MAX as u64 {
+            return Err(FsError::FileTooLarge);
+        }
+
+        let old_size = inode_data.file_size as u64;
+        let new_size = length as u32;
+        let cluster_size = sb_data.cluster_size as u64;
+
+        // Calculate cluster counts
+        let old_clusters = if old_size == 0 {
+            0
+        } else {
+            old_size.div_ceil(cluster_size) as usize
+        };
+        let new_clusters = if length == 0 {
+            0
+        } else {
+            length.div_ceil(cluster_size) as usize
+        };
+
+        let mut new_start_cluster = inode_data.start_cluster;
+
+        if new_clusters < old_clusters {
+            // Shrinking: truncate cluster chain
+            if new_clusters == 0 {
+                // Free all clusters
+                if inode_data.start_cluster != 0 {
+                    free_cluster_chain(&sb_data, inode_data.start_cluster)?;
+                }
+                new_start_cluster = 0;
+            } else {
+                // Keep first new_clusters, free the rest
+                let chain = read_cluster_chain(&sb_data, inode_data.start_cluster)?;
+                if new_clusters < chain.len() {
+                    // Mark last kept cluster as end-of-chain
+                    set_fat_entry(&sb_data, chain[new_clusters - 1], FAT_EOC)?;
+                    // Free remaining clusters
+                    free_cluster_chain(&sb_data, chain[new_clusters])?;
+                }
+                // If chain.len() <= new_clusters, the on-disk chain is already
+                // at or below the target size (possibly due to FS inconsistency).
+                // Nothing to free; the chain's last cluster should already be EOC.
+            }
+        } else if new_clusters > old_clusters {
+            // Extending: allocate more clusters
+            let additional = new_clusters - old_clusters;
+            if inode_data.start_cluster == 0 {
+                // File was empty, allocate new chain
+                let new_chain = extend_cluster_chain(&sb_data, 0, additional)?;
+                if !new_chain.is_empty() {
+                    new_start_cluster = new_chain[0];
+                    // Zero the new clusters
+                    for &cluster in &new_chain {
+                        let offset = cluster_to_offset(&sb_data, cluster);
+                        let zeros = vec![0u8; cluster_size as usize];
+                        write_bytes(&sb_data.bdev, offset, &zeros)?;
+                    }
+                }
+            } else {
+                // Extend existing chain
+                let chain = read_cluster_chain(&sb_data, inode_data.start_cluster)?;
+                let last = *chain.last().unwrap_or(&0);
+                let new_chain = extend_cluster_chain(&sb_data, last, additional)?;
+                // Zero the new clusters
+                for &cluster in &new_chain {
+                    let offset = cluster_to_offset(&sb_data, cluster);
+                    let zeros = vec![0u8; cluster_size as usize];
+                    write_bytes(&sb_data.bdev, offset, &zeros)?;
+                }
+            }
+        }
+
+        // Update directory entry
+        if inode_data.parent_cluster != 0 {
+            update_dir_entry_by_short_name(
+                &sb_data,
+                inode_data.parent_cluster,
+                &inode_data.short_name,
+                new_start_cluster,
+                new_size,
+            )?;
+        }
+
+        // Update inode metadata
+        inode.set_size(length);
+        inode.set_private(Arc::new(VfatInodeData {
+            start_cluster: new_start_cluster,
+            file_size: new_size,
+            is_dir: false,
+            parent_cluster: inode_data.parent_cluster,
+            short_name: inode_data.short_name,
+        }));
+
+        Ok(())
+    }
+
+    fn rename(
+        &self,
+        old_dir: &Inode,
+        old_name: &str,
+        new_dir: &Arc<Inode>,
+        new_name: &str,
+        flags: u32,
+    ) -> Result<(), FsError> {
+        // RENAME_EXCHANGE not supported for FAT
+        if flags != 0 {
+            return Err(FsError::InvalidArgument);
+        }
+
+        let sb = old_dir.superblock().ok_or(FsError::IoError)?;
+        let sb_data = get_sb_data(&sb)?;
+        let old_dir_data = get_inode_data(old_dir)?;
+        let new_dir_data = get_inode_data(new_dir)?;
+
+        // Find the source entry
+        let old_entries = read_directory_entries(&sb_data, old_dir_data.start_cluster)?;
+        let old_entry = old_entries
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(old_name))
+            .ok_or(FsError::NotFound)?
+            .clone();
+
+        // Check if target already exists
+        let new_entries = read_directory_entries(&sb_data, new_dir_data.start_cluster)?;
+        if let Some(existing) = new_entries
+            .iter()
+            .find(|e| e.name.eq_ignore_ascii_case(new_name))
+        {
+            // Target exists - delete it (FAT replaces existing)
+            if existing.is_dir() != old_entry.is_dir() {
+                // Can't replace file with dir or vice versa
+                return Err(FsError::InvalidArgument);
+            }
+            if existing.is_dir() {
+                // Check if target dir is empty
+                let child_entries = read_directory_entries(&sb_data, existing.start_cluster)?;
+                for child in &child_entries {
+                    if child.name != "." && child.name != ".." {
+                        return Err(FsError::DirectoryNotEmpty);
+                    }
+                }
+            }
+            // Delete existing entry
+            let existing_cluster =
+                delete_dir_entry(&sb_data, new_dir_data.start_cluster, new_name)?;
+            if existing_cluster != 0 {
+                free_cluster_chain(&sb_data, existing_cluster)?;
+            }
+        }
+
+        // Create new entry with old entry's data
+        let attr_byte = if old_entry.is_dir() {
+            attr::DIRECTORY
+        } else {
+            attr::ARCHIVE
+        };
+        create_dir_entry_with_lfn(
+            &sb_data,
+            new_dir_data.start_cluster,
+            new_name,
+            attr_byte,
+            old_entry.start_cluster,
+            old_entry.file_size,
+        )?;
+
+        // Delete old entry (don't free clusters - they belong to new entry now)
+        delete_dir_entry(&sb_data, old_dir_data.start_cluster, old_name)?;
 
         Ok(())
     }
