@@ -394,32 +394,41 @@ pub const IPC_PERM_WRITE: u16 = 0o222;
 
 /// Check IPC permissions
 ///
+/// Follows Linux's ipcperms() logic: uses bitwise checking to ensure all
+/// requested permission bits are present in the granted bits.
+///
 /// Acquires the lock internally, following Linux's pattern.
-/// Returns 0 on success, -EACCES on failure
+/// Returns Ok(()) on success, Err(-EACCES) on failure
 pub fn ipc_checkperm(perm: &KernIpcPerm, flag: u16) -> Result<(), i32> {
     let cred = crate::task::percpu::current_cred();
     let euid = cred.euid;
     let gid = cred.egid;
 
-    // Extract requested permission bits
-    let requested = flag & 0o7;
+    // Extract requested permission bits (collapse to lowest 3 bits like Linux)
+    // Linux: requested_mode = (flag >> 6) | (flag >> 3) | flag
+    let requested = ((flag >> 6) | (flag >> 3) | flag) & 0o7;
 
     let _lock = perm.lock.lock();
     // SAFETY: We hold the lock
     let inner = unsafe { perm.mutable_ref() };
 
-    // Check owner permissions
-    if (euid == perm.cuid || euid == inner.uid) && (inner.mode >> 6) & 0o7 >= requested {
-        return Ok(());
-    }
+    // Determine which permission bits apply based on user/group matching
+    // Linux shifts granted_mode based on owner/group/other
+    let granted = if euid == perm.cuid || euid == inner.uid {
+        // Owner permissions
+        (inner.mode >> 6) & 0o7
+    } else if gid == perm.cgid || gid == inner.gid {
+        // Group permissions
+        (inner.mode >> 3) & 0o7
+    } else {
+        // Other permissions
+        inner.mode & 0o7
+    };
 
-    // Check group permissions
-    if (gid == perm.cgid || gid == inner.gid) && (inner.mode >> 3) & 0o7 >= requested {
-        return Ok(());
-    }
-
-    // Check other permissions
-    if inner.mode & 0o7 >= requested {
+    // Check if all requested bits are present in granted bits
+    // Linux: (requested_mode & ~granted_mode & 0007) means "any bit requested but not granted"
+    // We invert: (granted & requested) == requested means "all requested bits are granted"
+    if (granted & requested) == requested {
         return Ok(());
     }
 
