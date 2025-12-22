@@ -38,13 +38,13 @@ The `clone()` syscall creates a new process or thread. It is the fundamental bui
 
 | Flag | Value | Purpose | Status |
 |------|-------|---------|--------|
-| CLONE_NEWNS | 0x00020000 | New mount namespace | Stub (no real isolation) |
+| CLONE_NEWNS | 0x00020000 | New mount namespace | Implemented (stub isolation) |
 | CLONE_NEWUTS | 0x04000000 | New UTS namespace | Implemented |
-| CLONE_NEWIPC | 0x08000000 | New IPC namespace | Deferred |
-| CLONE_NEWPID | 0x20000000 | New PID namespace | Deferred |
-| CLONE_NEWNET | 0x40000000 | New network namespace | Deferred |
-| CLONE_NEWUSER | 0x10000000 | New user namespace | Deferred |
-| CLONE_NEWCGROUP | 0x02000000 | New cgroup namespace | Deferred |
+| CLONE_NEWIPC | 0x08000000 | New IPC namespace | Deferred (no SysV IPC) |
+| CLONE_NEWPID | 0x20000000 | New PID namespace | Implemented |
+| CLONE_NEWNET | 0x40000000 | New network namespace | Deferred (no network stack) |
+| CLONE_NEWUSER | 0x10000000 | New user namespace | Implemented |
+| CLONE_NEWCGROUP | 0x02000000 | New cgroup namespace | Deferred (no cgroups) |
 
 ### Debugging/Tracing Flags
 
@@ -123,14 +123,22 @@ When CLONE_VFORK is set:
 
 ### Namespace Support
 
-Currently implemented:
+Fully implemented:
 - **CLONE_NEWUTS**: Creates new UTS namespace with copied hostname/domainname
+- **CLONE_NEWPID**: Creates new PID namespace with hierarchical PID translation
+- **CLONE_NEWUSER**: Creates new user namespace with UID/GID mapping support
 
-Stubbed (no real isolation):
-- **CLONE_NEWNS**: Creates wrapper but mount tree is global
+Partially implemented:
+- **CLONE_NEWNS**: Creates new mount namespace wrapper (mount tree still global)
 
-Deferred:
-- CLONE_NEWIPC, CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWUSER, CLONE_NEWCGROUP
+Deferred (require subsystem support):
+- **CLONE_NEWIPC**: Requires SysV IPC implementation
+- **CLONE_NEWNET**: Requires network stack implementation
+- **CLONE_NEWCGROUP**: Requires cgroup implementation
+
+Related syscalls:
+- **unshare(2)**: Disassociate from current namespaces (implemented)
+- **setns(2)**: Join existing namespace via fd (implemented)
 
 ## Future Work
 
@@ -144,11 +152,11 @@ Deferred:
 - FS/GS base registers (x86_64)
 - TPIDR register (aarch64)
 
-### Tier 3: Namespace Completion
-- PID namespace with PID translation
-- Network namespace with isolated stack
-- IPC namespace with isolated objects
-- User namespace with UID/GID mapping
+### Tier 3: Remaining Namespaces
+- **CLONE_NEWNS**: Full mount isolation (requires per-namespace mount tree)
+- **CLONE_NEWNET**: Network namespace (requires network stack)
+- **CLONE_NEWIPC**: IPC namespace (requires SysV IPC)
+- **CLONE_NEWCGROUP**: Cgroup namespace (requires cgroup support)
 
 ### Tier 4: Modern Features
 - CLONE_PIDFD for pidfd-based process tracking
@@ -171,3 +179,8 @@ Deferred:
 - Linux namespaces(7) man page
 - kernel/task/mod.rs - Clone flag definitions
 - kernel/task/percpu.rs - do_clone() implementation
+- kernel/ns/mod.rs - Namespace proxy and syscalls (unshare, setns)
+- kernel/ns/uts.rs - UTS namespace implementation
+- kernel/ns/pid.rs - PID namespace implementation
+- kernel/ns/user.rs - User namespace implementation
+- kernel/fs/procfs.rs - /proc/<pid>/ns/* namespace files

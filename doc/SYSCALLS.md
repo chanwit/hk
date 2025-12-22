@@ -610,11 +610,9 @@ linasm.sourceforge.net
 
 11.2 Namespaces
 
-- [ ] unshare
-
-- [ ] setns
-
-- [ ] clone / clone3 with namespace flags
+- [x] unshare
+- [x] setns
+- [x] clone / clone3 with namespace flags
 
 11.3 Host identity
 

@@ -100,6 +100,10 @@ pub const SYS_UNAME: u64 = 160;
 pub const SYS_SETHOSTNAME: u64 = 161;
 pub const SYS_SETDOMAINNAME: u64 = 162;
 
+// Namespace syscalls
+pub const SYS_UNSHARE: u64 = 97;
+pub const SYS_SETNS: u64 = 268;
+
 // Signal syscalls (aarch64 numbers)
 pub const SYS_KILL: u64 = 129;
 pub const SYS_TKILL: u64 = 130;
@@ -2191,6 +2195,51 @@ pub fn sys_prlimit64(pid: i32, resource: u32, new_rlim: *const RLimit, old_rlim:
             in("x3") old_rlim as u64,
             lateout("x0") ret,
             clobber_abi("C"),
+        );
+    }
+    ret
+}
+
+// ============================================================================
+// Namespace syscalls
+// ============================================================================
+
+/// Namespace clone flags
+pub const CLONE_NEWNS: u64 = 0x0002_0000;
+pub const CLONE_NEWUTS: u64 = 0x0400_0000;
+pub const CLONE_NEWIPC: u64 = 0x0800_0000;
+pub const CLONE_NEWUSER: u64 = 0x1000_0000;
+pub const CLONE_NEWPID: u64 = 0x2000_0000;
+pub const CLONE_NEWNET: u64 = 0x4000_0000;
+
+/// unshare(flags) - disassociate parts of process execution context
+#[inline(always)]
+pub fn sys_unshare(flags: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") SYS_UNSHARE,
+            in("x0") flags,
+            lateout("x0") ret,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// setns(fd, nstype) - reassociate thread with a namespace
+#[inline(always)]
+pub fn sys_setns(fd: i32, nstype: i32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x8") SYS_SETNS,
+            in("x0") fd as u64,
+            in("x1") nstype as u64,
+            lateout("x0") ret,
+            options(nostack),
         );
     }
     ret

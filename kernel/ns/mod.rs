@@ -2,7 +2,7 @@
 //!
 //! This module implements the namespace proxy (nsproxy) pattern from Linux,
 //! providing per-task namespace isolation. Each task has an NsProxy that
-//! holds references to its namespaces (UTS, mount, etc.).
+//! holds references to its namespaces (UTS, mount, PID, user, etc.).
 //!
 //! ## Design Overview
 //!
@@ -21,6 +21,8 @@
 //!
 //! VFS locks → Namespace locks → Filesystem context → Per-CPU scheduler → TASK_TABLE
 
+pub mod pid;
+pub mod user;
 pub mod uts;
 
 use alloc::collections::BTreeMap;
@@ -28,6 +30,11 @@ use alloc::sync::Arc;
 use spin::{Lazy, Mutex};
 
 use crate::task::Tid;
+pub use pid::{
+    INIT_PID_NS, PidNamespace, find_task_by_pid_ns, register_task_pids, task_pid_nr,
+    task_pid_nr_ns, unregister_task_pids,
+};
+pub use user::{INIT_USER_NS, UidGidExtent, UidGidMap, UserNamespace};
 pub use uts::{__NEW_UTS_LEN, INIT_UTS_NS, NewUtsname, UTS_FIELD_SIZE, UtsNamespace};
 
 // ============================================================================
@@ -96,18 +103,6 @@ impl MntNamespace {
 static INIT_MNT_NS: Lazy<Arc<MntNamespace>> = Lazy::new(MntNamespace::new_init);
 
 // ============================================================================
-// User Namespace Placeholder
-// ============================================================================
-
-/// User namespace (placeholder for capability checks)
-///
-/// Currently not implemented - all tasks have root capabilities.
-/// Future: proper user namespace with uid/gid mapping.
-pub struct UserNamespace {
-    // Placeholder
-}
-
-// ============================================================================
 // NsProxy - Namespace Proxy
 // ============================================================================
 
@@ -127,11 +122,15 @@ pub struct NsProxy {
 
     /// Mount namespace (filesystem view)
     pub mnt_ns: Arc<MntNamespace>,
+
+    /// PID namespace (process ID isolation)
+    pub pid_ns: Arc<PidNamespace>,
+
+    /// User namespace (UID/GID mapping)
+    pub user_ns: Arc<UserNamespace>,
     // Future namespaces:
     // pub ipc_ns: Arc<IpcNamespace>,
-    // pub pid_ns: Arc<PidNamespace>,
     // pub net_ns: Arc<NetNamespace>,
-    // pub user_ns: Arc<UserNamespace>,
     // pub cgroup_ns: Arc<CgroupNamespace>,
     // pub time_ns: Arc<TimeNamespace>,
 }
@@ -142,6 +141,8 @@ impl NsProxy {
         Self {
             uts_ns: INIT_UTS_NS.clone(),
             mnt_ns: INIT_MNT_NS.clone(),
+            pid_ns: INIT_PID_NS.clone(),
+            user_ns: INIT_USER_NS.clone(),
         }
     }
 
@@ -169,7 +170,24 @@ impl NsProxy {
             self.mnt_ns.clone()
         };
 
-        Ok(Arc::new(Self { uts_ns, mnt_ns }))
+        let pid_ns = if flags & CLONE_NEWPID != 0 {
+            PidNamespace::clone_ns(&self.pid_ns)?
+        } else {
+            self.pid_ns.clone()
+        };
+
+        let user_ns = if flags & CLONE_NEWUSER != 0 {
+            UserNamespace::clone_ns(&self.user_ns)?
+        } else {
+            self.user_ns.clone()
+        };
+
+        Ok(Arc::new(Self {
+            uts_ns,
+            mnt_ns,
+            pid_ns,
+            user_ns,
+        }))
     }
 }
 
@@ -264,4 +282,228 @@ pub fn current_mnt_ns() -> Arc<MntNamespace> {
     get_task_ns(tid)
         .map(|ns| ns.mnt_ns.clone())
         .unwrap_or_else(|| INIT_MNT_NS.clone())
+}
+
+/// Get current task's PID namespace
+///
+/// Returns the PID namespace for the calling task, or the init
+/// namespace if no namespace context is set.
+pub fn current_pid_ns() -> Arc<PidNamespace> {
+    let tid = crate::task::percpu::current_tid();
+    get_task_ns(tid)
+        .map(|ns| ns.pid_ns.clone())
+        .unwrap_or_else(|| INIT_PID_NS.clone())
+}
+
+/// Get current task's user namespace
+///
+/// Returns the user namespace for the calling task, or the init
+/// namespace if no namespace context is set.
+pub fn current_user_ns() -> Arc<UserNamespace> {
+    let tid = crate::task::percpu::current_tid();
+    get_task_ns(tid)
+        .map(|ns| ns.user_ns.clone())
+        .unwrap_or_else(|| INIT_USER_NS.clone())
+}
+
+// ============================================================================
+// Unshare Syscall
+// ============================================================================
+
+/// Error codes for namespace operations
+const EPERM: i64 = 1;
+const EINVAL: i64 = 22;
+
+/// Currently supported namespace flags for unshare
+///
+/// We support UTS, mount, PID, and user namespaces.
+const SUPPORTED_NS_FLAGS: u64 = CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUSER;
+
+/// sys_unshare - disassociate parts of the process execution context
+///
+/// Creates new namespaces for the calling process, disassociating from
+/// the parent's namespace(s).
+///
+/// # Arguments
+/// * `unshare_flags` - Bitwise OR of CLONE_NEW* flags
+///
+/// # Returns
+/// * 0 on success
+/// * -EPERM if unprivileged and namespace requires privilege
+/// * -EINVAL if unsupported flags are specified
+///
+/// # Notes
+/// Unlike clone(), unshare() always affects the calling thread.
+/// The new namespace takes effect immediately.
+pub fn sys_unshare(unshare_flags: u64) -> i64 {
+    let tid = crate::task::percpu::current_tid();
+    let ns_flags = unshare_flags & CLONE_NS_FLAGS;
+
+    // No namespace flags - nothing to do
+    if ns_flags == 0 {
+        return 0;
+    }
+
+    // Check for unsupported namespace flags
+    // Currently we support: UTS, mount
+    // PID and user will be added in Phase 2-3
+    let unsupported = ns_flags & !SUPPORTED_NS_FLAGS;
+    if unsupported != 0 {
+        return -EINVAL;
+    }
+
+    // Permission check: CAP_SYS_ADMIN required for namespace creation
+    // In our current model, only euid==0 has this capability
+    let cred = crate::task::percpu::current_cred();
+    if cred.euid != 0 {
+        return -EPERM;
+    }
+
+    // Get current namespace proxy
+    let current_ns = get_task_ns(tid).unwrap_or_else(|| INIT_NSPROXY.clone());
+
+    // Create new nsproxy with new namespace(s)
+    let new_ns = match current_ns.copy(ns_flags) {
+        Ok(ns) => ns,
+        Err(_) => return -EINVAL,
+    };
+
+    // Switch to new namespace (atomic via mutex)
+    switch_task_namespaces(tid, new_ns);
+
+    0
+}
+
+/// Switch a task's namespace to a new nsproxy
+///
+/// This atomically replaces the task's nsproxy. Used by both
+/// unshare() and setns().
+pub fn switch_task_namespaces(tid: Tid, new_ns: Arc<NsProxy>) {
+    TASK_NS.lock().insert(tid, new_ns);
+}
+
+// ============================================================================
+// Setns Syscall
+// ============================================================================
+
+/// Error codes for setns
+const EBADF: i64 = 9;
+const ESRCH: i64 = 3;
+
+/// sys_setns - reassociate thread with a namespace
+///
+/// Join an existing namespace by file descriptor. The fd should refer
+/// to a namespace file (typically `/proc/<pid>/ns/<type>`).
+///
+/// # Arguments
+/// * `fd` - File descriptor referring to a namespace
+/// * `nstype` - Type of namespace (0 = any, or specific CLONE_NEW* flag)
+///
+/// # Returns
+/// * 0 on success
+/// * -EBADF if fd is invalid or not a namespace file
+/// * -EINVAL if nstype doesn't match the namespace type
+/// * -EPERM if permission denied
+pub fn sys_setns(fd: i32, nstype: i32) -> i64 {
+    use crate::fs::procfs::{NamespaceType, ProcfsInodeData, ProcfsInodeWrapper};
+    use crate::task::fdtable::get_task_fd;
+    use crate::task::percpu::current_tid;
+
+    let tid = current_tid();
+
+    // Get file from fd
+    let fd_table = match get_task_fd(tid) {
+        Some(t) => t,
+        None => return -EBADF,
+    };
+    let file = match fd_table.lock().get(fd) {
+        Some(f) => f,
+        None => return -EBADF,
+    };
+
+    // Get inode from file
+    let inode = match file.get_inode() {
+        Some(i) => i,
+        None => return -EBADF,
+    };
+
+    // Get private data and check if it's a namespace file
+    let private = match inode.get_private() {
+        Some(p) => p,
+        None => return -EINVAL,
+    };
+
+    let wrapper = match private
+        .as_ref()
+        .as_any()
+        .downcast_ref::<ProcfsInodeWrapper>()
+    {
+        Some(w) => w,
+        None => return -EINVAL, // Not a procfs file
+    };
+
+    let data = wrapper.0.read();
+    let (target_pid, ns_type) = match &*data {
+        ProcfsInodeData::NamespaceFile { pid, ns_type } => (*pid, *ns_type),
+        _ => return -EINVAL, // Not a namespace file
+    };
+
+    // Validate nstype if specified
+    if nstype != 0 {
+        let expected_flag = ns_type.clone_flag() as i32;
+        if nstype != expected_flag {
+            return -EINVAL;
+        }
+    }
+
+    // Get the TID for the target PID
+    let target_tid = match crate::fs::procfs::get_tid_for_pid(target_pid) {
+        Some(tid) => tid,
+        None => return -ESRCH,
+    };
+
+    // Permission check: require root for now
+    let cred = crate::task::percpu::current_cred();
+    if cred.euid != 0 {
+        return -EPERM;
+    }
+
+    // Get target task's namespace using TID
+    let target_ns = match get_task_ns(target_tid) {
+        Some(ns) => ns,
+        None => return -ESRCH,
+    };
+
+    let current_ns = get_task_ns(tid).unwrap_or_else(|| INIT_NSPROXY.clone());
+
+    // Create new nsproxy with the target namespace for the specified type
+    let new_ns = match ns_type {
+        NamespaceType::Uts => Arc::new(NsProxy {
+            uts_ns: target_ns.uts_ns.clone(),
+            mnt_ns: current_ns.mnt_ns.clone(),
+            pid_ns: current_ns.pid_ns.clone(),
+            user_ns: current_ns.user_ns.clone(),
+        }),
+        NamespaceType::Mnt => Arc::new(NsProxy {
+            uts_ns: current_ns.uts_ns.clone(),
+            mnt_ns: target_ns.mnt_ns.clone(),
+            pid_ns: current_ns.pid_ns.clone(),
+            user_ns: current_ns.user_ns.clone(),
+        }),
+        NamespaceType::Pid => Arc::new(NsProxy {
+            uts_ns: current_ns.uts_ns.clone(),
+            mnt_ns: current_ns.mnt_ns.clone(),
+            pid_ns: target_ns.pid_ns.clone(),
+            user_ns: current_ns.user_ns.clone(),
+        }),
+        NamespaceType::User => Arc::new(NsProxy {
+            uts_ns: current_ns.uts_ns.clone(),
+            mnt_ns: current_ns.mnt_ns.clone(),
+            pid_ns: current_ns.pid_ns.clone(),
+            user_ns: target_ns.user_ns.clone(),
+        }),
+    };
+
+    switch_task_namespaces(tid, new_ns);
+    0
 }

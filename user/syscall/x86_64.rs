@@ -1326,6 +1326,58 @@ pub fn sys_setdomainname(name: *const u8, len: u64) -> i64 {
 }
 
 // ============================================================================
+// Namespace syscalls
+// ============================================================================
+
+const SYS_UNSHARE: u64 = 272;
+const SYS_SETNS: u64 = 308;
+
+/// Namespace clone flags
+pub const CLONE_NEWNS: u64 = 0x0002_0000;
+pub const CLONE_NEWUTS: u64 = 0x0400_0000;
+pub const CLONE_NEWIPC: u64 = 0x0800_0000;
+pub const CLONE_NEWUSER: u64 = 0x1000_0000;
+pub const CLONE_NEWPID: u64 = 0x2000_0000;
+pub const CLONE_NEWNET: u64 = 0x4000_0000;
+
+/// unshare(flags) - disassociate parts of process execution context
+#[inline(always)]
+pub fn sys_unshare(flags: u64) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_UNSHARE,
+            in("rdi") flags,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// setns(fd, nstype) - reassociate thread with a namespace
+#[inline(always)]
+pub fn sys_setns(fd: i32, nstype: i32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_SETNS,
+            in("rdi") fd as u64,
+            in("rsi") nstype as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+// ============================================================================
 // Signal syscalls
 // ============================================================================
 

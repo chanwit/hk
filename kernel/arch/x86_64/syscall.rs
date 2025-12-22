@@ -324,6 +324,12 @@ pub const SYS_SETRLIMIT: u64 = 160;
 /// prlimit64(pid, resource, new_rlim, old_rlim)
 pub const SYS_PRLIMIT64: u64 = 302;
 
+// Namespaces
+/// unshare(flags) - disassociate parts of process execution context
+pub const SYS_UNSHARE: u64 = 272;
+/// setns(fd, nstype) - reassociate thread with a namespace
+pub const SYS_SETNS: u64 = 308;
+
 /// Model Specific Registers for syscall
 const MSR_EFER: u32 = 0xC000_0080; // Extended Feature Enable Register
 const MSR_STAR: u32 = 0xC000_0081; // Segment selectors for syscall/sysret
@@ -1088,6 +1094,10 @@ pub fn x86_64_syscall_dispatch(
         SYS_UNAME => crate::ns::uts::sys_uname(arg0) as u64,
         SYS_SETHOSTNAME => crate::ns::uts::sys_sethostname(arg0, arg1) as u64,
         SYS_SETDOMAINNAME => crate::ns::uts::sys_setdomainname(arg0, arg1) as u64,
+
+        // Namespace syscalls
+        SYS_UNSHARE => crate::ns::sys_unshare(arg0) as u64,
+        SYS_SETNS => crate::ns::sys_setns(arg0 as i32, arg1 as i32) as u64,
 
         // Signal syscalls
         SYS_RT_SIGACTION => {

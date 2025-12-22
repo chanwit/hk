@@ -40,7 +40,9 @@ pub use path::{
     lookup_path, lookup_path_at, lookup_path_flags,
 };
 pub use path_ref::Path;
-pub use procfs::{PROCFS_FILE_OPS, PROCFS_TYPE};
+pub use procfs::{
+    NamespaceType, PROCFS_FILE_OPS, PROCFS_TYPE, ProcfsInodeData, ProcfsInodeWrapper,
+};
 pub use ramfs::{
     RAMFS_FILE_OPS, RAMFS_INODE_OPS, RAMFS_TYPE, RamfsInodeData, ramfs_create_blkdev,
     ramfs_create_chrdev, ramfs_create_dir, ramfs_create_dir_with_owner,
