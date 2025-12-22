@@ -139,6 +139,13 @@ setup_x86_config() {
             -device usb-storage,drive=usbdisk,bus=xhci.0
         )
     fi
+
+    # Network: Intel e1000 with user-mode (slirp) networking
+    # Guest can reach host at 10.0.2.2, gateway/DNS at 10.0.2.2/10.0.2.3
+    QEMU_ARGS+=(
+        -netdev user,id=n0
+        -device e1000,netdev=n0
+    )
 }
 
 setup_arm_config() {
@@ -196,6 +203,13 @@ setup_arm_config() {
             -device usb-storage,drive=usbdisk,bus=xhci.0
         )
     fi
+
+    # Network: Intel e1000 with user-mode (slirp) networking
+    # Guest can reach host at 10.0.2.2, gateway/DNS at 10.0.2.2/10.0.2.3
+    QEMU_ARGS+=(
+        -netdev user,id=n0
+        -device e1000,netdev=n0
+    )
 }
 
 # Check QEMU availability

@@ -269,3 +269,13 @@ impl TimeKeeper {
 
 /// Global timekeeper instance
 pub static TIMEKEEPER: TimeKeeper = TimeKeeper::new();
+
+/// Get current monotonic time in milliseconds (simple tick count)
+///
+/// This provides a simple monotonic tick suitable for timeouts and
+/// timestamp comparisons. Returns 0 if timekeeper is not initialized.
+pub fn current_ticks() -> u64 {
+    let ts = TIMEKEEPER.current_time();
+    // Convert to milliseconds
+    ts.sec as u64 * 1000 + ts.nsec as u64 / 1_000_000
+}

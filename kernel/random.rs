@@ -210,3 +210,13 @@ pub fn get_random_bytes(buf: &mut [u8], flags: u32) -> Result<usize, i32> {
     crng.fill_bytes(buf);
     Ok(buf.len())
 }
+
+/// Get a random 32-bit integer
+///
+/// This is a convenience wrapper around get_random_bytes for getting
+/// a single random u32 value (e.g., for TCP initial sequence numbers).
+pub fn get_random_u32() -> u32 {
+    let mut buf = [0u8; 4];
+    let _ = get_random_bytes(&mut buf, 0);
+    u32::from_ne_bytes(buf)
+}

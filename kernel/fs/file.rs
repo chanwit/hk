@@ -80,6 +80,9 @@ pub struct DirEntry {
 
 /// File operations trait - filesystem-specific behavior for open files
 pub trait FileOps: Send + Sync {
+    /// Returns self as Any for downcasting to concrete types
+    fn as_any(&self) -> &dyn core::any::Any;
+
     /// Read from file at current position
     fn read(&self, file: &File, buf: &mut [u8]) -> Result<usize, FsError>;
 
@@ -274,6 +277,11 @@ impl File {
         self.get_inode().map(|i| i.mode().is_dir()).unwrap_or(false)
     }
 
+    /// Get the file operations
+    pub fn ops(&self) -> &'static dyn FileOps {
+        self.f_op
+    }
+
     /// Read from file
     pub fn read(&self, buf: &mut [u8]) -> Result<usize, FsError> {
         if !self.is_readable() {
@@ -345,6 +353,10 @@ impl Drop for File {
 pub struct NullFileOps;
 
 impl FileOps for NullFileOps {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn read(&self, _file: &File, _buf: &mut [u8]) -> Result<usize, FsError> {
         Err(FsError::NotSupported)
     }
@@ -385,6 +397,10 @@ impl CharDevFileOps {
 }
 
 impl FileOps for CharDevFileOps {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn read(&self, file: &File, buf: &mut [u8]) -> Result<usize, FsError> {
         let inode = file.get_inode().ok_or(FsError::InvalidFile)?;
         let rdev = inode.rdev;

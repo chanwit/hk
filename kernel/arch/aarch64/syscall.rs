@@ -183,6 +183,34 @@ pub const SYS_SETRLIMIT: u64 = 164;
 /// prlimit64(pid, resource, new_rlim, old_rlim)
 pub const SYS_PRLIMIT64: u64 = 261;
 
+// Socket syscalls (aarch64 numbers)
+/// socket(domain, type, protocol)
+pub const SYS_SOCKET: u64 = 198;
+/// bind(fd, addr, addrlen)
+pub const SYS_BIND: u64 = 200;
+/// listen(fd, backlog)
+pub const SYS_LISTEN: u64 = 201;
+/// accept(fd, addr, addrlen)
+pub const SYS_ACCEPT: u64 = 202;
+/// connect(fd, addr, addrlen)
+pub const SYS_CONNECT: u64 = 203;
+/// getsockname(fd, addr, addrlen)
+pub const SYS_GETSOCKNAME: u64 = 204;
+/// getpeername(fd, addr, addrlen)
+pub const SYS_GETPEERNAME: u64 = 205;
+/// sendto(fd, buf, len, flags, dest_addr, addrlen)
+pub const SYS_SENDTO: u64 = 206;
+/// recvfrom(fd, buf, len, flags, src_addr, addrlen)
+pub const SYS_RECVFROM: u64 = 207;
+/// setsockopt(fd, level, optname, optval, optlen)
+pub const SYS_SETSOCKOPT: u64 = 208;
+/// getsockopt(fd, level, optname, optval, optlen)
+pub const SYS_GETSOCKOPT: u64 = 209;
+/// shutdown(fd, how)
+pub const SYS_SHUTDOWN: u64 = 210;
+/// accept4(fd, addr, addrlen, flags)
+pub const SYS_ACCEPT4: u64 = 242;
+
 // ============================================================================
 // Syscall dispatcher
 // ============================================================================
@@ -493,6 +521,60 @@ pub fn aarch64_syscall_dispatch(
         SYS_GETRLIMIT => crate::rlimit::sys_getrlimit(arg0 as u32, arg1) as u64,
         SYS_SETRLIMIT => crate::rlimit::sys_setrlimit(arg0 as u32, arg1) as u64,
         SYS_PRLIMIT64 => crate::rlimit::sys_prlimit64(arg0 as i32, arg1 as u32, arg2, arg3) as u64,
+
+        // Socket syscalls
+        SYS_SOCKET => {
+            use crate::net::syscall::sys_socket;
+            sys_socket(arg0 as i32, arg1 as i32, arg2 as i32) as u64
+        }
+        SYS_CONNECT => {
+            use crate::net::syscall::sys_connect;
+            sys_connect(arg0 as i32, arg1, arg2) as u64
+        }
+        SYS_BIND => {
+            use crate::net::syscall::sys_bind;
+            sys_bind(arg0 as i32, arg1, arg2) as u64
+        }
+        SYS_LISTEN => {
+            use crate::net::syscall::sys_listen;
+            sys_listen(arg0 as i32, arg1 as i32) as u64
+        }
+        SYS_ACCEPT => {
+            use crate::net::syscall::sys_accept;
+            sys_accept(arg0 as i32, arg1, arg2) as u64
+        }
+        SYS_ACCEPT4 => {
+            use crate::net::syscall::sys_accept4;
+            sys_accept4(arg0 as i32, arg1, arg2, arg3 as i32) as u64
+        }
+        SYS_SHUTDOWN => {
+            use crate::net::syscall::sys_shutdown;
+            sys_shutdown(arg0 as i32, arg1 as i32) as u64
+        }
+        SYS_GETSOCKNAME => {
+            use crate::net::syscall::sys_getsockname;
+            sys_getsockname(arg0 as i32, arg1, arg2) as u64
+        }
+        SYS_GETPEERNAME => {
+            use crate::net::syscall::sys_getpeername;
+            sys_getpeername(arg0 as i32, arg1, arg2) as u64
+        }
+        SYS_SETSOCKOPT => {
+            use crate::net::syscall::sys_setsockopt;
+            sys_setsockopt(arg0 as i32, arg1 as i32, arg2 as i32, arg3, arg4) as u64
+        }
+        SYS_GETSOCKOPT => {
+            use crate::net::syscall::sys_getsockopt;
+            sys_getsockopt(arg0 as i32, arg1 as i32, arg2 as i32, arg3, arg4) as u64
+        }
+        SYS_SENDTO => {
+            use crate::net::syscall::sys_sendto;
+            sys_sendto(arg0 as i32, arg1, arg2, arg3 as i32, arg4, _arg5) as u64
+        }
+        SYS_RECVFROM => {
+            use crate::net::syscall::sys_recvfrom;
+            sys_recvfrom(arg0 as i32, arg1, arg2, arg3 as i32, arg4, _arg5) as u64
+        }
 
         // Unimplemented syscalls
         _ => {

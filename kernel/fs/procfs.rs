@@ -450,6 +450,10 @@ pub static PROCFS_INODE_OPS: ProcfsInodeOps = ProcfsInodeOps;
 pub struct ProcfsFileOps;
 
 impl FileOps for ProcfsFileOps {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn read(&self, file: &File, buf: &mut [u8]) -> Result<usize, FsError> {
         let inode = file.get_inode().ok_or(FsError::InvalidFile)?;
         let private = inode.get_private().ok_or(FsError::IoError)?;

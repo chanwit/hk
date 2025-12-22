@@ -161,6 +161,10 @@ impl BlockFileOps {
 }
 
 impl FileOps for BlockFileOps {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn read(&self, file: &File, buf: &mut [u8]) -> Result<usize, FsError> {
         let bdev = Self::get_bdev(file)?;
         let pos = file.get_pos();

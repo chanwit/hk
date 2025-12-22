@@ -26,6 +26,7 @@ pub mod workqueue;
 // Device subsystems
 pub mod dt;
 pub mod gfx;
+pub mod net;
 pub mod tty;
 pub mod usb;
 
@@ -643,6 +644,7 @@ fn kmain() -> ! {
     // ========================================================================
 
     use crate::bus::{BusManager, PciBus};
+    use crate::net::driver::E1000PciDriver;
     use crate::usb::msc::{UsbMscBusDriver, UsbMscDeviceHandle};
     use crate::usb::{UsbSerialBusDriver, xhci::XhciPciDriver};
     use alloc::boxed::Box;
@@ -658,6 +660,7 @@ fn kmain() -> ! {
 
     // Register PCI drivers
     bus_manager.register_driver("pci", Box::new(XhciPciDriver));
+    bus_manager.register_driver("pci", Box::new(E1000PciDriver));
 
     // Register USB drivers (queued until USB bus is created by xHCI)
     bus_manager.register_driver("usb", Box::new(UsbSerialBusDriver));

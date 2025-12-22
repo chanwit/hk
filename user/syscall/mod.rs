@@ -361,3 +361,97 @@ impl Default for UtsName {
         }
     }
 }
+
+// ============================================================================
+// Socket types and constants
+// ============================================================================
+
+/// Socket address for IPv4 (struct sockaddr_in)
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SockAddrIn {
+    /// Address family (AF_INET)
+    pub sin_family: u16,
+    /// Port number (network byte order / big-endian)
+    pub sin_port: u16,
+    /// IPv4 address (network byte order / big-endian)
+    pub sin_addr: u32,
+    /// Padding to match sockaddr size
+    pub sin_zero: [u8; 8],
+}
+
+impl SockAddrIn {
+    /// Create a new socket address
+    pub const fn new(family: u16, port: u16, addr: u32) -> Self {
+        Self {
+            sin_family: family,
+            sin_port: port,
+            sin_addr: addr,
+            sin_zero: [0; 8],
+        }
+    }
+
+    /// Create an address for INADDR_ANY:0
+    pub const fn any() -> Self {
+        Self::new(AF_INET as u16, 0, 0)
+    }
+}
+
+// Address families
+pub const AF_UNIX: i32 = 1;
+pub const AF_INET: i32 = 2;
+pub const AF_INET6: i32 = 10;
+
+// Socket types
+pub const SOCK_STREAM: i32 = 1;
+pub const SOCK_DGRAM: i32 = 2;
+pub const SOCK_RAW: i32 = 3;
+
+// Socket type flags (can be ORed with socket type)
+pub const SOCK_NONBLOCK: i32 = 0o4000;
+pub const SOCK_CLOEXEC: i32 = 0o2000000;
+
+// Shutdown "how" values
+pub const SHUT_RD: i32 = 0;
+pub const SHUT_WR: i32 = 1;
+pub const SHUT_RDWR: i32 = 2;
+
+// Protocol numbers
+pub const IPPROTO_TCP: i32 = 6;
+pub const IPPROTO_UDP: i32 = 17;
+
+// Error codes (positive values, syscalls return negative)
+pub const EAFNOSUPPORT: i64 = 97;
+pub const ECONNREFUSED: i64 = 111;
+pub const EINPROGRESS: i64 = 115;
+pub const ENOTCONN: i64 = 107;
+
+/// Convert host byte order to network byte order (big-endian) for u16
+#[inline]
+pub const fn htons(val: u16) -> u16 {
+    val.to_be()
+}
+
+/// Convert network byte order to host byte order for u16
+#[inline]
+pub const fn ntohs(val: u16) -> u16 {
+    u16::from_be(val)
+}
+
+/// Convert host byte order to network byte order (big-endian) for u32
+#[inline]
+pub const fn htonl(val: u32) -> u32 {
+    val.to_be()
+}
+
+/// Convert network byte order to host byte order for u32
+#[inline]
+pub const fn ntohl(val: u32) -> u32 {
+    u32::from_be(val)
+}
+
+/// Create an IPv4 address from four octets (e.g., make_ipv4(10, 0, 2, 2))
+#[inline]
+pub const fn make_ipv4(a: u8, b: u8, c: u8, d: u8) -> u32 {
+    ((a as u32) << 24) | ((b as u32) << 16) | ((c as u32) << 8) | (d as u32)
+}

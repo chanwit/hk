@@ -141,6 +141,19 @@ pub const SYS_GETRLIMIT: u64 = 97;
 pub const SYS_SETRLIMIT: u64 = 160;
 pub const SYS_PRLIMIT64: u64 = 302;
 
+// Socket syscalls
+pub const SYS_SOCKET: u64 = 41;
+pub const SYS_CONNECT: u64 = 42;
+pub const SYS_SENDTO: u64 = 44;
+pub const SYS_RECVFROM: u64 = 45;
+pub const SYS_SHUTDOWN: u64 = 48;
+pub const SYS_BIND: u64 = 49;
+pub const SYS_LISTEN: u64 = 50;
+pub const SYS_GETSOCKNAME: u64 = 51;
+pub const SYS_GETPEERNAME: u64 = 52;
+pub const SYS_SETSOCKOPT: u64 = 54;
+pub const SYS_GETSOCKOPT: u64 = 55;
+
 // ============================================================================
 // Syscall wrapper functions
 // ============================================================================
@@ -2391,6 +2404,271 @@ pub fn sys_prlimit64(pid: i32, resource: u32, new_rlim: *const RLimit, old_rlim:
             in("rsi") resource as u64,
             in("rdx") new_rlim as u64,
             in("r10") old_rlim as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+// ============================================================================
+// Socket syscalls
+// ============================================================================
+
+/// socket(domain, type, protocol) - create a socket
+///
+/// Creates a socket for network communication.
+/// Returns file descriptor on success, or negative errno.
+#[inline(always)]
+pub fn sys_socket(domain: i32, sock_type: i32, protocol: i32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_SOCKET,
+            in("rdi") domain as u64,
+            in("rsi") sock_type as u64,
+            in("rdx") protocol as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// connect(fd, addr, addrlen) - initiate a connection on a socket
+///
+/// Connects the socket to the address specified.
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_connect(fd: i32, addr: *const u8, addrlen: u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_CONNECT,
+            in("rdi") fd as u64,
+            in("rsi") addr as u64,
+            in("rdx") addrlen as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// bind(fd, addr, addrlen) - bind a name to a socket
+///
+/// Assigns the address to the socket.
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_bind(fd: i32, addr: *const u8, addrlen: u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_BIND,
+            in("rdi") fd as u64,
+            in("rsi") addr as u64,
+            in("rdx") addrlen as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// listen(fd, backlog) - listen for connections on a socket
+///
+/// Marks the socket as a passive socket for accepting connections.
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_listen(fd: i32, backlog: i32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_LISTEN,
+            in("rdi") fd as u64,
+            in("rsi") backlog as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// shutdown(fd, how) - shut down part of a full-duplex connection
+///
+/// Shuts down the connection. `how`: SHUT_RD(0), SHUT_WR(1), SHUT_RDWR(2)
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_shutdown(fd: i32, how: i32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_SHUTDOWN,
+            in("rdi") fd as u64,
+            in("rsi") how as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// getsockname(fd, addr, addrlen) - get socket name
+///
+/// Returns the current address bound to the socket.
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_getsockname(fd: i32, addr: *mut u8, addrlen: *mut u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_GETSOCKNAME,
+            in("rdi") fd as u64,
+            in("rsi") addr as u64,
+            in("rdx") addrlen as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// getpeername(fd, addr, addrlen) - get name of connected peer socket
+///
+/// Returns the address of the peer connected to the socket.
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_getpeername(fd: i32, addr: *mut u8, addrlen: *mut u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_GETPEERNAME,
+            in("rdi") fd as u64,
+            in("rsi") addr as u64,
+            in("rdx") addrlen as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// sendto(fd, buf, len, flags, dest_addr, addrlen) - send a message on a socket
+///
+/// Sends data to a socket. For connected sockets, dest_addr can be NULL.
+/// Returns number of bytes sent, or negative errno.
+#[inline(always)]
+pub fn sys_sendto(fd: i32, buf: *const u8, len: usize, flags: i32, dest_addr: *const u8, addrlen: u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_SENDTO,
+            in("rdi") fd as u64,
+            in("rsi") buf as u64,
+            in("rdx") len as u64,
+            in("r10") flags as u64,
+            in("r8") dest_addr as u64,
+            in("r9") addrlen as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// recvfrom(fd, buf, len, flags, src_addr, addrlen) - receive a message from a socket
+///
+/// Receives data from a socket.
+/// Returns number of bytes received, or negative errno.
+#[inline(always)]
+pub fn sys_recvfrom(fd: i32, buf: *mut u8, len: usize, flags: i32, src_addr: *mut u8, addrlen: *mut u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_RECVFROM,
+            in("rdi") fd as u64,
+            in("rsi") buf as u64,
+            in("rdx") len as u64,
+            in("r10") flags as u64,
+            in("r8") src_addr as u64,
+            in("r9") addrlen as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// setsockopt(fd, level, optname, optval, optlen) - set socket options
+///
+/// Sets options on a socket.
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_setsockopt(fd: i32, level: i32, optname: i32, optval: *const u8, optlen: u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_SETSOCKOPT,
+            in("rdi") fd as u64,
+            in("rsi") level as u64,
+            in("rdx") optname as u64,
+            in("r10") optval as u64,
+            in("r8") optlen as u64,
+            lateout("rax") ret,
+            out("rcx") _,
+            out("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
+/// getsockopt(fd, level, optname, optval, optlen) - get socket options
+///
+/// Gets options on a socket.
+/// Returns 0 on success, or negative errno.
+#[inline(always)]
+pub fn sys_getsockopt(fd: i32, level: i32, optname: i32, optval: *mut u8, optlen: *mut u32) -> i64 {
+    let ret: i64;
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_GETSOCKOPT,
+            in("rdi") fd as u64,
+            in("rsi") level as u64,
+            in("rdx") optname as u64,
+            in("r10") optval as u64,
+            in("r8") optlen as u64,
             lateout("rax") ret,
             out("rcx") _,
             out("r11") _,

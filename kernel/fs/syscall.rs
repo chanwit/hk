@@ -2836,17 +2836,13 @@ pub fn sys_renameat2(
 
     // Same-inode check: if source and target are the same file, return success
     // (Linux vfs_rename: "if (source == target) return 0;")
-    if let Some(ref src_dentry) = old_dentry {
-        if let Some(ref dst_dentry) = new_dentry {
-            if let (Some(src_inode), Some(dst_inode)) =
-                (src_dentry.get_inode(), dst_dentry.get_inode())
-            {
-                if src_inode.ino == dst_inode.ino {
-                    unlock_rename(&old_parent_dentry, &new_parent_dentry);
-                    return 0;
-                }
-            }
-        }
+    if let Some(ref src_dentry) = old_dentry
+        && let Some(ref dst_dentry) = new_dentry
+        && let (Some(src_inode), Some(dst_inode)) = (src_dentry.get_inode(), dst_dentry.get_inode())
+        && src_inode.ino == dst_inode.ino
+    {
+        unlock_rename(&old_parent_dentry, &new_parent_dentry);
+        return 0;
     }
 
     // Cycle detection: prevent moving a directory into its own subtree

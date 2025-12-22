@@ -239,6 +239,10 @@ impl PipeReadFileOps {
 }
 
 impl FileOps for PipeReadFileOps {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn read(&self, file: &File, buf: &mut [u8]) -> Result<usize, FsError> {
         let nonblock = file.get_flags() & flags::O_NONBLOCK != 0;
 
@@ -353,6 +357,10 @@ impl PipeWriteFileOps {
 }
 
 impl FileOps for PipeWriteFileOps {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn read(&self, _file: &File, _buf: &mut [u8]) -> Result<usize, FsError> {
         // Cannot read from write end
         Err(FsError::InvalidArgument)

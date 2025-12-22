@@ -130,6 +130,11 @@ impl InodeMode {
         Self((FileType::Fifo as u16) | (perm & 0o7777))
     }
 
+    /// Create mode for a socket with given permissions
+    pub fn socket(perm: u16) -> Self {
+        Self((FileType::Socket as u16) | (perm & 0o7777))
+    }
+
     /// Get permission bits (lower 12 bits)
     pub fn perm(&self) -> u16 {
         self.0 & 0o7777

@@ -706,6 +706,10 @@ pub static RAMFS_INODE_OPS: RamfsInodeOps = RamfsInodeOps;
 pub struct RamfsFileOps;
 
 impl FileOps for RamfsFileOps {
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
+
     fn read(&self, file: &File, buf: &mut [u8]) -> Result<usize, FsError> {
         use crate::frame_alloc::FrameAllocRef;
         use crate::{FRAME_ALLOCATOR, PAGE_CACHE};
