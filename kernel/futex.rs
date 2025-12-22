@@ -41,6 +41,13 @@ use spin::Mutex;
 
 use crate::arch::IrqSpinlock;
 use crate::task::{Priority, TaskState, Tid};
+use crate::uaccess::{get_user, put_user};
+
+// Architecture-specific uaccess implementation
+#[cfg(target_arch = "x86_64")]
+use crate::arch::x86_64::uaccess::X86_64Uaccess as Uaccess;
+#[cfg(target_arch = "aarch64")]
+use crate::arch::aarch64::uaccess::Aarch64Uaccess as Uaccess;
 
 // Error constants (as i32 for syscall returns)
 const EAGAIN: i32 = 11;
@@ -251,38 +258,33 @@ impl RobustListHead {
 // =============================================================================
 
 /// Read a u32 from user memory
+///
+/// Uses proper uaccess infrastructure which:
+/// - Validates address is in user space range
+/// - Handles SMAP protection on x86_64
+/// - Checks alignment
 fn read_user_u32(addr: u64) -> Result<u32, i32> {
-    if addr == 0 || !addr.is_multiple_of(4) {
-        return Err(-EFAULT);
-    }
-
-    // Safety: We're reading from user space, which may fault.
-    // The kernel page tables should have user pages mapped.
-    let ptr = addr as *const u32;
-    unsafe { Ok(core::ptr::read_volatile(ptr)) }
+    get_user::<Uaccess, u32>(addr).map_err(|_| -EFAULT)
 }
 
 /// Write a u32 to user memory
+///
+/// Uses proper uaccess infrastructure which:
+/// - Validates address is in user space range
+/// - Handles SMAP protection on x86_64
+/// - Checks alignment
 fn write_user_u32(addr: u64, val: u32) -> Result<(), i32> {
-    if addr == 0 || !addr.is_multiple_of(4) {
-        return Err(-EFAULT);
-    }
-
-    let ptr = addr as *mut u32;
-    unsafe {
-        core::ptr::write_volatile(ptr, val);
-    }
-    Ok(())
+    put_user::<Uaccess, u32>(addr, val).map_err(|_| -EFAULT)
 }
 
 /// Read a u64 from user memory
+///
+/// Uses proper uaccess infrastructure which:
+/// - Validates address is in user space range
+/// - Handles SMAP protection on x86_64
+/// - Checks alignment
 fn read_user_u64(addr: u64) -> Result<u64, i32> {
-    if addr == 0 || !addr.is_multiple_of(8) {
-        return Err(-EFAULT);
-    }
-
-    let ptr = addr as *const u64;
-    unsafe { Ok(core::ptr::read_volatile(ptr)) }
+    get_user::<Uaccess, u64>(addr).map_err(|_| -EFAULT)
 }
 
 /// Read a timespec from user memory and convert to nanoseconds
@@ -750,19 +752,17 @@ pub fn sys_get_robust_list(pid: i32, head_ptr: u64, len_ptr: u64) -> i32 {
     let head = robust_list.get(&target_tid).copied().unwrap_or(0);
 
     // Write head pointer to user memory
-    if head_ptr != 0 {
-        let ptr = head_ptr as *mut u64;
-        unsafe {
-            core::ptr::write_volatile(ptr, head);
-        }
+    if head_ptr != 0
+        && put_user::<Uaccess, u64>(head_ptr, head).is_err()
+    {
+        return -EFAULT;
     }
 
     // Write length to user memory
-    if len_ptr != 0 {
-        let ptr = len_ptr as *mut u64;
-        unsafe {
-            core::ptr::write_volatile(ptr, RobustListHead::SIZE as u64);
-        }
+    if len_ptr != 0
+        && put_user::<Uaccess, u64>(len_ptr, RobustListHead::SIZE as u64).is_err()
+    {
+        return -EFAULT;
     }
 
     0
