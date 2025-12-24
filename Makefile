@@ -14,7 +14,7 @@ VFAT_SIZE_KB = 1024
 
 # EXT4 root filesystem image settings
 EXT4_IMAGE = target/ext4-root.img
-EXT4_SIZE_MB = 8
+EXT4_SIZE_MB = 16
 EXT4_ROOT_DIR = target/ext4-root
 
 .PHONY: all build debug user iso iso-debug iso-ext4 run run-debug run-ext4 test check check-ext4 clean info help vfat-image ext4-image
@@ -72,22 +72,48 @@ vfat-image:
 
 # Create an ext4 root filesystem image with proper directory structure
 # Requires: e2fsprogs (mkfs.ext4)
-ext4-image: user
+ext4-image:
 	@mkdir -p $(EXT4_ROOT_DIR)/dev
 	@mkdir -p $(EXT4_ROOT_DIR)/proc
 	@mkdir -p $(EXT4_ROOT_DIR)/bin
+	@mkdir -p $(EXT4_ROOT_DIR)/sbin
 	@mkdir -p $(EXT4_ROOT_DIR)/tmp
 	@mkdir -p $(EXT4_ROOT_DIR)/sys
 	@mkdir -p $(EXT4_ROOT_DIR)/etc
 	@mkdir -p $(EXT4_ROOT_DIR)/home
 	@mkdir -p $(EXT4_ROOT_DIR)/root
 	@mkdir -p $(EXT4_ROOT_DIR)/var
-	@cp user/target/x86_64-unknown-linux-gnu/release/boot_tester $(EXT4_ROOT_DIR)/bin/init
+	@mkdir -p $(EXT4_ROOT_DIR)/usr/bin
+	@mkdir -p $(EXT4_ROOT_DIR)/usr/sbin
+	@# Ensure busybox is available
+	@if [ ! -f target/downloads/busybox ]; then \
+		echo "Downloading busybox..."; \
+		mkdir -p target/downloads; \
+		apt-get install -y -qq busybox-static >/dev/null 2>&1; \
+		cp /bin/busybox target/downloads/busybox; \
+	fi
+	@# Copy busybox to /bin
+	@cp target/downloads/busybox $(EXT4_ROOT_DIR)/bin/busybox
+	@chmod +x $(EXT4_ROOT_DIR)/bin/busybox
+	@# Copy busybox as init (no symlink - ext4 doesn't support symlinks yet)
+	@cp target/downloads/busybox $(EXT4_ROOT_DIR)/bin/init
 	@chmod +x $(EXT4_ROOT_DIR)/bin/init
+	@# Copy busybox as sh (no symlink - ext4 doesn't support symlinks yet)
+	@cp target/downloads/busybox $(EXT4_ROOT_DIR)/bin/sh
+	@chmod +x $(EXT4_ROOT_DIR)/bin/sh
+	@cp target/downloads/busybox $(EXT4_ROOT_DIR)/bin/ash
+	@chmod +x $(EXT4_ROOT_DIR)/bin/ash
+	@# TODO: Add more utilities when ext4 symlink support is implemented
+	@# For now, shell can use busybox directly via: busybox ls, busybox cat, etc.
+	@# Create /etc/inittab for busybox init
+	@echo '::sysinit:/bin/sh' > $(EXT4_ROOT_DIR)/etc/inittab
+	@echo '::respawn:/bin/sh' >> $(EXT4_ROOT_DIR)/etc/inittab
+	@echo '::ctrlaltdel:/bin/reboot' >> $(EXT4_ROOT_DIR)/etc/inittab
+	@echo '::shutdown:/bin/umount -a -r' >> $(EXT4_ROOT_DIR)/etc/inittab
 	@echo "Creating $(EXT4_IMAGE) ($(EXT4_SIZE_MB)MB) from $(EXT4_ROOT_DIR)..."
 	@dd if=/dev/zero of=$(EXT4_IMAGE) bs=1M count=$(EXT4_SIZE_MB) 2>/dev/null
 	@mkfs.ext4 -q -L "HK_ROOT" -d $(EXT4_ROOT_DIR) $(EXT4_IMAGE)
-	@echo "Created $(EXT4_IMAGE) with root filesystem structure"
+	@echo "Created $(EXT4_IMAGE) with busybox shell and utilities"
 
 iso: build user vfat-image
 	@mkdir -p target/iso/boot/grub
