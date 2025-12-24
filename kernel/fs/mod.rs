@@ -17,6 +17,7 @@ pub mod syscall;
 
 // Filesystem implementations
 pub mod cpio;
+pub mod ext4;
 pub mod procfs;
 pub mod ramfs;
 pub mod vfat;
@@ -52,6 +53,7 @@ pub use superblock::{
     FileSystemType, SuperBlock, SuperOps, find_filesystem, init_fs_registry, register_filesystem,
 };
 pub use vfat::{VFAT_FILE_OPS, VFAT_TYPE};
+pub use ext4::{EXT4_FILE_OPS, EXT4_TYPE};
 pub use vfs::{FileMetadata, FileSystem, FsError, Vfs};
 
 /// Filesystem error types (extending the original FsError)
