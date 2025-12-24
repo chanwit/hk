@@ -1167,6 +1167,16 @@ impl PageCache {
             ::core::ptr::write_bytes(frame as *mut u8, 0, PAGE_SIZE);
         }
 
+        // Call readpage to populate the page with data from the filesystem
+        unsafe {
+            let buf = ::core::slice::from_raw_parts_mut(frame as *mut u8, PAGE_SIZE);
+            if let Err(_e) = a_ops.readpage(file_id, page_offset, buf) {
+                // readpage failed - free the frame and return error
+                frame_alloc.free_frame(frame);
+                return Err(PageCacheError::OutOfMemory);
+            }
+        }
+
         // Create cached page
         let page = Arc::new(CachedPage::new(frame, file_id, page_offset));
 

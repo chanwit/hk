@@ -765,10 +765,11 @@ fn kmain() -> ! {
         .get_private()
         .expect("/bin/init has no private data");
 
-    let file_id = if let Some(ramfs_data) = private.as_ref().as_any().downcast_ref::<fs::RamfsInodeData>() {
-        ramfs_data.file_id.expect("/bin/init (ramfs) has no file_id")
+    // Determine filesystem type and get appropriate parameters for page cache
+    let (file_id, is_ramfs) = if let Some(ramfs_data) = private.as_ref().as_any().downcast_ref::<fs::RamfsInodeData>() {
+        (ramfs_data.file_id.expect("/bin/init (ramfs) has no file_id"), true)
     } else if let Some(ext4_data) = private.as_ref().as_any().downcast_ref::<fs::Ext4InodeData>() {
-        ext4_data.file_id.expect("/bin/init (ext4) has no file_id")
+        (ext4_data.file_id.expect("/bin/init (ext4) has no file_id"), false)
     } else {
         panic!("/bin/init is neither ramfs nor ext4");
     };
@@ -785,20 +786,32 @@ fn kmain() -> ! {
             let chunk_size =
                 ::core::cmp::min(PC_PAGE_SIZE - offset_in_page, file_size - bytes_read);
 
-            // Get page from cache (pages should exist since file was populated at boot)
+            // Get page from cache
+            // For ramfs: pages already exist, use NULL_AOPS, unevictable
+            // For ext4: pages need to be read from disk, use EXT4_AOPS, evictable
             let page = {
                 let mut cache = PAGE_CACHE.lock();
-                let (page, _) = cache
-                    .find_or_create_page(
+                let (page, _) = if is_ramfs {
+                    cache.find_or_create_page(
                         file_id,
                         page_offset,
                         file_size as u64,
                         &mut frame_alloc,
                         false,      // can_writeback
                         true,       // unevictable (ramfs pages)
-                        &NULL_AOPS, // Generic ops - page should already exist
+                        &NULL_AOPS, // Generic ops - page already exists
                     )
-                    .expect("Failed to get page for /bin/init");
+                } else {
+                    cache.find_or_create_page(
+                        file_id,
+                        page_offset,
+                        file_size as u64,
+                        &mut frame_alloc,
+                        false,      // can_writeback (read-only ext4)
+                        false,      // evictable (ext4 pages can be reclaimed)
+                        &fs::EXT4_AOPS, // Ext4 ops - triggers readpage
+                    )
+                }.expect("Failed to get page for /bin/init");
                 page
             };
 

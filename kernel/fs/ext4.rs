@@ -22,10 +22,8 @@ use core::mem::size_of;
 
 use spin::RwLock;
 
-use crate::frame_alloc::FrameAllocRef;
 use crate::mm::page_cache::{AddressSpaceOps, FileId, PAGE_SIZE};
-use crate::storage::{BlockDevice, DevId, get_blkdev};
-use crate::{FRAME_ALLOCATOR, PAGE_CACHE};
+use crate::storage::BlockDevice;
 
 use super::dentry::Dentry;
 use super::file::{DirEntry as VfsDirEntry, File, FileOps};
@@ -86,22 +84,67 @@ const EXT4_FT_SYMLINK: u8 = 7;
 // Ext4 AddressSpaceOps - Page I/O
 // ============================================================================
 
+/// Global registry of ext4 superblock data indexed by dev_id
+static EXT4_SB_REGISTRY: spin::Mutex<alloc::collections::BTreeMap<u32, alloc::sync::Arc<Ext4SbData>>> =
+    spin::Mutex::new(alloc::collections::BTreeMap::new());
+
+/// Register an ext4 superblock in the global registry
+fn register_ext4_sb(dev_id: u32, sb_data: alloc::sync::Arc<Ext4SbData>) {
+    EXT4_SB_REGISTRY.lock().insert(dev_id, sb_data);
+}
+
+/// Look up ext4 superblock data by dev_id
+fn get_ext4_sb(dev_id: u32) -> Option<alloc::sync::Arc<Ext4SbData>> {
+    EXT4_SB_REGISTRY.lock().get(&dev_id).cloned()
+}
+
 /// Ext4 address space operations for page cache
 pub struct Ext4AddressSpaceOps;
 
 impl AddressSpaceOps for Ext4AddressSpaceOps {
     fn readpage(&self, file_id: FileId, page_offset: u64, buf: &mut [u8]) -> Result<usize, i32> {
-        // Decode FileId to get block device
-        let (major, minor) = file_id.to_blkdev().ok_or(-5)?; // EIO
-        let bdev = get_blkdev(DevId::new(major, minor)).ok_or(-5)?;
+        // Decode FileId: 0x5000_0000_0000_0000 | (dev_id << 32) | ino
+        // Bits 56-63: 0x50 (filesystem marker)
+        // Bits 32-55: dev_id (24 bits, though typically small)
+        // Bits 0-31: ino (32 bits)
+        let raw = file_id.0;
+        let dev_id = ((raw >> 32) & 0x00FF_FFFF) as u32;  // Mask out filesystem marker
+        let ino = (raw & 0xFFFF_FFFF) as u32;
 
-        // Read from block device
-        bdev.disk
-            .queue
-            .driver()
-            .readpage(&bdev.disk, buf, page_offset);
+        // Get ext4 superblock data from registry
+        let sb_data = get_ext4_sb(dev_id).ok_or(-5)?; // EIO
 
-        Ok(PAGE_SIZE)
+        // Read the inode
+        let ext4_inode = sb_data.read_inode(ino).map_err(|_| -5)?;
+
+        // Calculate how many blocks we need to read to fill the page
+        let blocks_per_page = PAGE_SIZE as u64 / sb_data.block_size as u64;
+        let first_logical_block = page_offset * blocks_per_page;
+
+        // Read all blocks needed to fill this page
+        let mut bytes_read = 0;
+        for block_idx in 0..blocks_per_page {
+            let logical_block = first_logical_block + block_idx;
+
+            // Map logical block to physical block using extent tree
+            let phys_block = sb_data
+                .extent_map_block(&ext4_inode, logical_block)
+                .map_err(|_| -5)?;
+
+            // Read the physical block
+            let block_data = read_block(&sb_data.bdev, phys_block, sb_data.block_size).map_err(|_| -5)?;
+
+            // Copy to buffer at the appropriate offset
+            let copy_size = core::cmp::min(block_data.len(), buf.len() - bytes_read);
+            buf[bytes_read..bytes_read + copy_size].copy_from_slice(&block_data[..copy_size]);
+            bytes_read += copy_size;
+
+            if bytes_read >= buf.len() {
+                break;
+            }
+        }
+
+        Ok(bytes_read)
     }
 
     fn writepage(&self, _file_id: FileId, _page_offset: u64, _buf: &[u8]) -> Result<usize, i32> {
@@ -395,52 +438,32 @@ fn read_block(bdev: &BlockDevice, block_num: u64, block_size: u32) -> Result<Vec
     Ok(buf)
 }
 
-/// Read bytes from block device via page cache
+/// Read bytes from block device (direct I/O, no page cache)
+/// This is used for reading ext4 metadata blocks, not file data
 fn read_bytes(bdev: &BlockDevice, offset: u64, buf: &mut [u8]) -> Result<(), FsError> {
-    let file_id = FileId::from_blkdev(bdev.dev_id().major, bdev.dev_id().minor);
-    let capacity = bdev.capacity();
-
     let mut pos = offset;
     let mut remaining = buf.len();
     let mut buf_offset = 0;
 
+    // Read directly from disk driver without page cache to avoid
+    // confusion between block device FileIds and ext4 file FileIds
     while remaining > 0 {
         let page_offset = pos / PAGE_SIZE as u64;
         let offset_in_page = (pos % PAGE_SIZE as u64) as usize;
         let chunk_size = core::cmp::min(remaining, PAGE_SIZE - offset_in_page);
 
-        let (frame, needs_read) = {
-            let mut cache = PAGE_CACHE.lock();
-            let mut frame_alloc = FrameAllocRef(&FRAME_ALLOCATOR);
-            let (page, is_new) = cache
-                .find_or_create_page(
-                    file_id,
-                    page_offset,
-                    capacity,
-                    &mut frame_alloc,
-                    false, // ext4 read-only, no writeback
-                    false,
-                    &EXT4_AOPS,
-                )
-                .map_err(|_| FsError::IoError)?;
-            (page.frame, is_new)
-        };
+        // Allocate temporary page buffer on heap
+        let mut page_buf = alloc::vec![0u8; PAGE_SIZE];
 
-        if needs_read {
-            let page_buf = unsafe { core::slice::from_raw_parts_mut(frame as *mut u8, PAGE_SIZE) };
-            bdev.disk
-                .queue
-                .driver()
-                .readpage(&bdev.disk, page_buf, page_offset);
-        }
+        // Read page from disk
+        bdev.disk
+            .queue
+            .driver()
+            .readpage(&bdev.disk, &mut page_buf, page_offset);
 
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                (frame as *const u8).add(offset_in_page),
-                buf.as_mut_ptr().add(buf_offset),
-                chunk_size,
-            );
-        }
+        // Copy relevant chunk to output buffer
+        buf[buf_offset..buf_offset + chunk_size]
+            .copy_from_slice(&page_buf[offset_in_page..offset_in_page + chunk_size]);
 
         pos += chunk_size as u64;
         buf_offset += chunk_size;
@@ -1046,7 +1069,11 @@ fn ext4_mount_dev(
 
     // Create VFS superblock
     let sb = SuperBlock::new(fs_type, &EXT4_SUPER_OPS, 0);
-    sb.set_private(Arc::new(sb_data));
+    let sb_data_arc = Arc::new(sb_data);
+    sb.set_private(sb_data_arc.clone());
+
+    // Register in global registry for page cache lookups
+    register_ext4_sb(sb.dev_id as u32, sb_data_arc.clone());
 
     // Get superblock data
     let sb_private = sb.get_private().ok_or(FsError::IoError)?;
