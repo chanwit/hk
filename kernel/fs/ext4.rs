@@ -363,9 +363,20 @@ pub struct Ext4InodeData {
     pub ino: u32,
     /// Cached extent tree root (i_block[0..60])
     pub extent_data: [u8; 60],
+    /// FileId for page cache lookup (regular files only)
+    pub file_id: Option<crate::mm::page_cache::FileId>,
 }
 
 impl InodeData for Ext4InodeData {}
+
+/// Generate a unique FileId for ext4 files
+/// Uses format: 0x5000_0000_0000_0000 | (dev_id << 32) | ino
+/// The high bit pattern distinguishes ext4 from ramfs (0x4000...)
+pub fn ext4_file_id(sb: &crate::fs::SuperBlock, ino: u32) -> crate::mm::page_cache::FileId {
+    use crate::mm::page_cache::FileId;
+    let dev_id = sb.dev_id;
+    FileId::new(0x5000_0000_0000_0000 | (dev_id << 32) | (ino as u64))
+}
 
 impl AsAny for Ext4InodeData {
     fn as_any(&self) -> &dyn core::any::Any {
@@ -847,9 +858,18 @@ fn create_vfs_inode(
         );
     }
 
+    // Allocate file_id for regular files (for page cache)
+    let file_type = vfs_inode.mode().file_type();
+    let file_id = if file_type == Some(FileType::Regular) {
+        Some(ext4_file_id(sb, ino))
+    } else {
+        None
+    };
+
     vfs_inode.set_private(Arc::new(Ext4InodeData {
         ino,
         extent_data,
+        file_id,
     }));
 
     Ok(vfs_inode)

@@ -760,16 +760,19 @@ fn kmain() -> ! {
     };
     let init_inode = init_dentry.get_inode().expect("/bin/init has no inode");
 
-    // Get file_id from ramfs inode for page cache access
+    // Get file_id from inode for page cache access (works with both ramfs and ext4)
     let private = init_inode
         .get_private()
         .expect("/bin/init has no private data");
-    let ramfs_data = private
-        .as_ref()
-        .as_any()
-        .downcast_ref::<fs::RamfsInodeData>()
-        .expect("/bin/init is not a ramfs file");
-    let file_id = ramfs_data.file_id.expect("/bin/init has no file_id");
+
+    let file_id = if let Some(ramfs_data) = private.as_ref().as_any().downcast_ref::<fs::RamfsInodeData>() {
+        ramfs_data.file_id.expect("/bin/init (ramfs) has no file_id")
+    } else if let Some(ext4_data) = private.as_ref().as_any().downcast_ref::<fs::Ext4InodeData>() {
+        ext4_data.file_id.expect("/bin/init (ext4) has no file_id")
+    } else {
+        panic!("/bin/init is neither ramfs nor ext4");
+    };
+
     let file_size = init_inode.get_size() as usize;
 
     // Read entire file from page cache into buffer

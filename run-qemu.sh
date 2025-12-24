@@ -3,6 +3,7 @@
 #
 # Usage: ./run-qemu.sh [options]
 #   --arch ARCH  Select architecture: x86 (default) or arm
+#   --ext4-root  Use ext4-root.img as USB storage and boot with root=/dev/sd0
 #   -d           Enable debug (no reboot on crash)
 #   -g           Enable GDB server on port 1234
 #   -t           Test mode (exit after timeout, used by make check)
@@ -22,6 +23,7 @@ GDB_MODE=false
 TEST_MODE=false
 TIMEOUT=30
 USB_CONSOLE=false
+EXT4_ROOT=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -29,6 +31,10 @@ while [[ $# -gt 0 ]]; do
         --arch)
             ARCH="$2"
             shift 2
+            ;;
+        --ext4-root)
+            EXT4_ROOT=true
+            shift
             ;;
         -d)
             DEBUG_MODE=true
@@ -51,13 +57,14 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            echo "Usage: $0 [--arch x86|arm] [-d] [-g] [-t] [-T seconds] [-u]"
-            echo "  --arch ARCH  Architecture: x86 (default) or arm"
-            echo "  -d           Debug mode (no reboot on crash)"
-            echo "  -g           Enable GDB server on port 1234"
-            echo "  -t           Test mode (run with timeout, log to file)"
-            echo "  -T seconds   Timeout in seconds (default: 30)"
-            echo "  -u           USB serial console mode (x86 only)"
+            echo "Usage: $0 [--arch x86|arm] [--ext4-root] [-d] [-g] [-t] [-T seconds] [-u]"
+            echo "  --arch ARCH   Architecture: x86 (default) or arm"
+            echo "  --ext4-root   Use ext4-root.img as USB storage and boot with root=/dev/sd0"
+            echo "  -d            Debug mode (no reboot on crash)"
+            echo "  -g            Enable GDB server on port 1234"
+            echo "  -t            Test mode (run with timeout, log to file)"
+            echo "  -T seconds    Timeout in seconds (default: 30)"
+            echo "  -u            USB serial console mode (x86 only)"
             exit 0
             ;;
         *)
@@ -131,11 +138,21 @@ setup_x86_config() {
         )
     fi
 
-    # Add USB mass storage device if vfat.img exists
-    VFAT_IMG="target/vfat.img"
-    if [ -f "$VFAT_IMG" ]; then
+    # Add USB mass storage device
+    # Use ext4-root.img if --ext4-root specified, otherwise vfat.img
+    if [ "$EXT4_ROOT" = true ]; then
+        USB_IMG="target/ext4-root.img"
+        if [ ! -f "$USB_IMG" ]; then
+            echo "Error: ext4-root.img not found. Run 'make ext4-image' first."
+            exit 1
+        fi
+    else
+        USB_IMG="target/vfat.img"
+    fi
+
+    if [ -f "$USB_IMG" ]; then
         QEMU_ARGS+=(
-            -drive id=usbdisk,if=none,format=raw,file="$VFAT_IMG"
+            -drive id=usbdisk,if=none,format=raw,file="$USB_IMG"
             -device usb-storage,drive=usbdisk,bus=xhci.0
         )
     fi
@@ -195,11 +212,21 @@ setup_arm_config() {
     # Add xHCI USB controller
     QEMU_ARGS+=(-device qemu-xhci,id=xhci)
 
-    # Add USB mass storage device if vfat.img exists
-    VFAT_IMG="target/vfat.img"
-    if [ -f "$VFAT_IMG" ]; then
+    # Add USB mass storage device
+    # Use ext4-root.img if --ext4-root specified, otherwise vfat.img
+    if [ "$EXT4_ROOT" = true ]; then
+        USB_IMG="target/ext4-root.img"
+        if [ ! -f "$USB_IMG" ]; then
+            echo "Error: ext4-root.img not found. Run 'make ext4-image' first."
+            exit 1
+        fi
+    else
+        USB_IMG="target/vfat.img"
+    fi
+
+    if [ -f "$USB_IMG" ]; then
         QEMU_ARGS+=(
-            -drive id=usbdisk,if=none,format=raw,file="$VFAT_IMG"
+            -drive id=usbdisk,if=none,format=raw,file="$USB_IMG"
             -device usb-storage,drive=usbdisk,bus=xhci.0
         )
     fi
