@@ -55,6 +55,23 @@ const EXT4_EXT_MAGIC: u16 = 0xF30A;
 // Inode flags
 const EXT4_EXTENTS_FL: u32 = 0x00080000; // Inode uses extents
 
+// Feature flags - incompatible features that prevent read-only mounting
+const EXT4_FEATURE_INCOMPAT_COMPRESSION: u32 = 0x0001; // Compression
+const EXT4_FEATURE_INCOMPAT_FILETYPE: u32 = 0x0002;    // Directory entries have file type
+const EXT4_FEATURE_INCOMPAT_RECOVER: u32 = 0x0004;     // Journal recovery needed
+const EXT4_FEATURE_INCOMPAT_JOURNAL_DEV: u32 = 0x0008; // Journal on separate device
+const EXT4_FEATURE_INCOMPAT_META_BG: u32 = 0x0010;     // Meta block groups
+const EXT4_FEATURE_INCOMPAT_EXTENTS: u32 = 0x0040;     // Extents support
+const EXT4_FEATURE_INCOMPAT_64BIT: u32 = 0x0080;       // 64-bit support
+const EXT4_FEATURE_INCOMPAT_MMP: u32 = 0x0100;         // Multi-mount protection
+const EXT4_FEATURE_INCOMPAT_FLEX_BG: u32 = 0x0200;     // Flexible block groups
+const EXT4_FEATURE_INCOMPAT_EA_INODE: u32 = 0x0400;    // Extended attributes in inode
+const EXT4_FEATURE_INCOMPAT_DIRDATA: u32 = 0x1000;     // Data in directory entries
+const EXT4_FEATURE_INCOMPAT_CSUM_SEED: u32 = 0x2000;   // Metadata checksum seed
+const EXT4_FEATURE_INCOMPAT_LARGEDIR: u32 = 0x4000;    // Large directories (>2GB)
+const EXT4_FEATURE_INCOMPAT_INLINE_DATA: u32 = 0x8000; // Inline data in inode
+const EXT4_FEATURE_INCOMPAT_ENCRYPT: u32 = 0x10000;    // Encryption
+
 // File type in directory entries
 const EXT4_FT_UNKNOWN: u8 = 0;
 const EXT4_FT_REG_FILE: u8 = 1;
@@ -439,6 +456,30 @@ impl Ext4SbData {
         if sb.s_magic != EXT4_SUPER_MAGIC {
             return Err(FsError::IoError);
         }
+
+        // Check for incompatible features that we cannot support in read-only mode
+        // Features we explicitly reject:
+        // - COMPRESSION: Compressed files require special decompression
+        // - ENCRYPT: Encrypted files require decryption keys
+        // - INLINE_DATA: Data stored in inode i_block area instead of extent tree
+        // - JOURNAL_DEV: Filesystem is a journal device, not a normal filesystem
+        let unsupported_features = EXT4_FEATURE_INCOMPAT_COMPRESSION
+            | EXT4_FEATURE_INCOMPAT_ENCRYPT
+            | EXT4_FEATURE_INCOMPAT_INLINE_DATA
+            | EXT4_FEATURE_INCOMPAT_JOURNAL_DEV;
+
+        if sb.s_feature_incompat & unsupported_features != 0 {
+            // Filesystem has features we cannot handle
+            return Err(FsError::NotSupported);
+        }
+
+        // Features we can safely ignore for read-only:
+        // - RECOVER: Journal needs recovery (safe to ignore when mounting read-only)
+        // - FILETYPE: Directory entries have file type (we support this)
+        // - EXTENTS: Extent tree support (we support this)
+        // - 64BIT: 64-bit block numbers (we support this)
+        // - META_BG, MMP, FLEX_BG, EA_INODE, DIRDATA, CSUM_SEED, LARGEDIR:
+        //   All safe to ignore for read-only operations
 
         // Calculate block size
         let block_size = 1024u32 << sb.s_log_block_size;
