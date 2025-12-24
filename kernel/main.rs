@@ -694,26 +694,37 @@ fn kmain() -> ! {
     // Architecture-specific VFS extras (e.g., VFAT ramdisk from multiboot2 module on x86)
     CurrentArch::init_vfs_extras();
 
-    // ========================================================================
-    // Phase 6: Initramfs Unpacking
-    // ========================================================================
-    let initramfs_data = CurrentArch::get_initramfs();
-    let root_dentry = fs::MOUNT_NS
-        .get_root_dentry()
-        .expect("VFS root not initialized");
-    match fs::unpack_cpio(initramfs_data, &root_dentry) {
-        Ok(n) => printkln!("initramfs: {} files", n),
-        Err(e) => {
-            printkln!("ERR: initramfs: {:?}", e);
-            CurrentArch::halt_loop();
-        }
-    }
-
     // Create /dev/sd0 device node if SCSI disk was created
+    // This must happen before trying to mount ext4 root
     if scsi_disk_created {
         let dev_dentry = fs::lookup_path("/dev").expect("/dev must exist");
         let rdev = crate::storage::DevId::new(crate::storage::major::SCSI_DISK, 0);
         let _ = fs::ramfs::ramfs_create_blkdev(&dev_dentry, "sd0", rdev, 0o660);
+    }
+
+    // ========================================================================
+    // Phase 6: Root Filesystem Mount
+    // ========================================================================
+    // Try to mount ext4 root if root= was specified on command line
+    // If successful, skip initramfs unpacking (ext4 is the real root)
+    // If not specified or fails, use ramfs with initramfs
+    let ext4_root_mounted = try_mount_ext4_root();
+
+    if !ext4_root_mounted {
+        // ========================================================================
+        // Phase 6a: Initramfs Unpacking (ramfs root only)
+        // ========================================================================
+        let initramfs_data = CurrentArch::get_initramfs();
+        let root_dentry = fs::MOUNT_NS
+            .get_root_dentry()
+            .expect("VFS root not initialized");
+        match fs::unpack_cpio(initramfs_data, &root_dentry) {
+            Ok(n) => printkln!("initramfs: {} files", n),
+            Err(e) => {
+                printkln!("ERR: initramfs: {:?}", e);
+                CurrentArch::halt_loop();
+            }
+        }
     }
 
     // ========================================================================
@@ -950,11 +961,8 @@ const DEFAULT_RAMDISK_SIZE_MB: u64 = 8;
 ///
 /// This is the unified VFS initialization shared between architectures.
 fn init_vfs_core() {
-    use crate::chardev::DevId;
-    use crate::storage::create_ramdisk;
-    use crate::storage::major;
     use fs::{
-        PROCFS_TYPE, RAMFS_TYPE, do_mount, init_fs_registry, ramfs_create_blkdev, ramfs_create_dir,
+        PROCFS_TYPE, RAMFS_TYPE, do_mount, init_fs_registry, ramfs_create_dir,
     };
 
     init_fs_registry();
@@ -984,18 +992,32 @@ fn init_vfs_core() {
         Err(_) => return,
     };
 
+    // Setup device nodes in /dev
+    setup_dev_nodes(&dev_dentry);
+
+    printkln!("VFS: ok");
+}
+
+/// Setup device nodes in /dev directory
+///
+/// Creates standard device nodes like /dev/null, /dev/zero, /dev/tty, etc.
+/// This is called by both init_vfs_core() and try_mount_ext4_root().
+fn setup_dev_nodes(dev_dentry: &alloc::sync::Arc<fs::Dentry>) {
+    use crate::chardev::DevId;
+    use crate::chardev::major as chardev_major;
+    use crate::storage::create_ramdisk;
+    use crate::storage::major;
+    use fs::ramfs_create_blkdev;
+
     // Register built-in character devices (null, zero)
     crate::chardev::register_builtin_chardevs();
 
     // Register TTY character devices (serial, etc.)
     crate::tty::init_tty_chardevs();
 
-    // Create character device nodes in /dev
-    use crate::chardev::major as chardev_major;
-
     // /dev/null (major 1, minor 3)
     let _ = fs::ramfs_create_chrdev(
-        &dev_dentry,
+        dev_dentry,
         "null",
         DevId::new(chardev_major::MEM, 3),
         0o666,
@@ -1003,7 +1025,7 @@ fn init_vfs_core() {
 
     // /dev/zero (major 1, minor 5)
     let _ = fs::ramfs_create_chrdev(
-        &dev_dentry,
+        dev_dentry,
         "zero",
         DevId::new(chardev_major::MEM, 5),
         0o666,
@@ -1012,7 +1034,7 @@ fn init_vfs_core() {
     // /dev/ttyS0 (major 4, minor 64) - only create if TTY is registered
     if crate::chardev::get_chardev(DevId::new(chardev_major::TTYS, 64)).is_some() {
         let _ = fs::ramfs_create_chrdev(
-            &dev_dentry,
+            dev_dentry,
             "ttyS0",
             DevId::new(chardev_major::TTYS, 64),
             0o666,
@@ -1021,7 +1043,7 @@ fn init_vfs_core() {
 
     // /dev/tty (major 5, minor 0) - controlling terminal
     let _ = fs::ramfs_create_chrdev(
-        &dev_dentry,
+        dev_dentry,
         "tty",
         DevId::new(chardev_major::TTYAUX, 0),
         0o666,
@@ -1029,7 +1051,7 @@ fn init_vfs_core() {
 
     // /dev/console (major 5, minor 1) - kernel console
     let _ = fs::ramfs_create_chrdev(
-        &dev_dentry,
+        dev_dentry,
         "console",
         DevId::new(chardev_major::TTYAUX, 1),
         0o666,
@@ -1038,10 +1060,75 @@ fn init_vfs_core() {
     // Create RAM disk rd0 (8MB)
     if let Ok(_bdev) = create_ramdisk(0, DEFAULT_RAMDISK_SIZE_MB) {
         let rdev = DevId::new(major::RAMDISK, 0);
-        let _ = ramfs_create_blkdev(&dev_dentry, "rd0", rdev, 0o660);
+        let _ = ramfs_create_blkdev(dev_dentry, "rd0", rdev, 0o660);
+    }
+}
+
+/// Attempt to mount ext4 filesystem as root
+///
+/// If `root=<device>` was specified on kernel command line and the device exists,
+/// this will mount the ext4 filesystem and replace the ramfs root.
+///
+/// Returns true if ext4 root was successfully mounted, false otherwise.
+fn try_mount_ext4_root() -> bool {
+    use fs::{EXT4_TYPE, do_mount_dev};
+
+    // Check if root= was specified
+    let root_device = match cmdline::get_root_device() {
+        Some(dev) => dev,
+        None => return false,
+    };
+
+    printkln!("root: Attempting to mount {} as ext4 root", root_device);
+
+    // Mount ext4 filesystem
+    let ext4_mount = match do_mount_dev(&EXT4_TYPE, &root_device, None) {
+        Ok(m) => m,
+        Err(e) => {
+            printkln!("root: Failed to mount ext4: {:?}", e);
+            return false;
+        }
+    };
+
+    // Replace root mount point
+    fs::DCACHE.set_root(ext4_mount.root.clone());
+
+    // Verify /dev and /proc directories exist on ext4 root
+    // (they must exist since ext4 is read-only)
+    let dev_dentry = match fs::lookup_path("/dev") {
+        Ok(d) => d,
+        Err(_) => {
+            printkln!("root: ext4 root missing /dev directory");
+            return false;
+        }
+    };
+
+    let proc_dentry = match fs::lookup_path("/proc") {
+        Ok(d) => d,
+        Err(_) => {
+            printkln!("root: ext4 root missing /proc directory");
+            return false;
+        }
+    };
+
+    // Mount ramfs on /dev (for device nodes, since ext4 is read-only)
+    use fs::{RAMFS_TYPE, PROCFS_TYPE, do_mount};
+    if let Err(e) = do_mount(&RAMFS_TYPE, Some(dev_dentry.clone())) {
+        printkln!("root: Failed to mount ramfs on /dev: {:?}", e);
+        return false;
     }
 
-    printkln!("VFS: ok");
+    // Mount procfs on /proc
+    if let Err(e) = do_mount(&PROCFS_TYPE, Some(proc_dentry)) {
+        printkln!("root: Failed to mount procfs on /proc: {:?}", e);
+        return false;
+    }
+
+    // Setup device nodes in /dev (same as init_vfs_core)
+    setup_dev_nodes(&dev_dentry);
+
+    printkln!("root: Successfully mounted {} as ext4 root", root_device);
+    true
 }
 
 /// Initialize VFAT ramdisk from multiboot2 module

@@ -9,6 +9,9 @@
 //!   - Examples: `console=ttyS0`, `console=ttyS0,115200`
 //!   - Multiple console= options can be specified; all receive output
 //!   - The last one specified is the primary console
+//! - `root=<device>` - Set root filesystem device
+//!   - Examples: `root=/dev/sd0`, `root=/dev/sda1`
+//!   - If specified, kernel will attempt to mount this device as root
 
 use crate::usb;
 use spin::Mutex;
@@ -67,20 +70,68 @@ impl CmdlineConsole {
 
 static CMDLINE_CONSOLE: Mutex<CmdlineConsole> = Mutex::new(CmdlineConsole::new());
 
+/// Root device specification from command line
+struct RootDevice {
+    /// Device path (e.g., "/dev/sd0")
+    path: [u8; 64],
+    /// Path length
+    path_len: usize,
+}
+
+impl RootDevice {
+    const fn new() -> Self {
+        Self {
+            path: [0; 64],
+            path_len: 0,
+        }
+    }
+
+    /// Get device path as str
+    fn path(&self) -> Option<&str> {
+        if self.path_len > 0 {
+            core::str::from_utf8(&self.path[..self.path_len]).ok()
+        } else {
+            None
+        }
+    }
+
+    /// Set device path
+    fn set_path(&mut self, path: &str) {
+        let path_bytes = path.as_bytes();
+        let len = path_bytes.len().min(self.path.len());
+        self.path[..len].copy_from_slice(&path_bytes[..len]);
+        self.path_len = len;
+    }
+}
+
+static CMDLINE_ROOT: Mutex<RootDevice> = Mutex::new(RootDevice::new());
+
 /// Parse kernel command line and apply options
 ///
 /// Supported options:
 /// - `usb_trace`: Enable USB protocol tracing for debugging
 /// - `console=<device>[,<baud>]`: Set kernel console device
+/// - `root=<device>`: Set root filesystem device
 pub fn parse_cmdline(cmdline: &str) {
     for option in cmdline.split_whitespace() {
         if option == "usb_trace" {
             usb::enable_usb_trace();
         } else if let Some(console_arg) = option.strip_prefix("console=") {
             parse_console_option(console_arg);
+        } else if let Some(root_arg) = option.strip_prefix("root=") {
+            parse_root_option(root_arg);
         }
         // Unknown options are ignored
     }
+}
+
+/// Parse a root= option
+///
+/// Format: `root=<device>`
+/// Examples: `root=/dev/sd0`, `root=/dev/sda1`
+fn parse_root_option(arg: &str) {
+    let mut root = CMDLINE_ROOT.lock();
+    root.set_path(arg);
 }
 
 /// Parse a console= option
@@ -172,4 +223,12 @@ pub fn primary_cmdline_console() -> Option<ConsoleSpec> {
     } else {
         None
     }
+}
+
+/// Get the root device path from command line
+///
+/// Returns the device path if `root=` was specified, None otherwise
+pub fn get_root_device() -> Option<alloc::string::String> {
+    let root = CMDLINE_ROOT.lock();
+    root.path().map(|s| alloc::string::String::from(s))
 }
